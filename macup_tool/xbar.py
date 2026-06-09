@@ -39,6 +39,9 @@ def _bash_quote(value: str) -> str:
 def install(cli: str | None = None) -> Path:
     paths.xbar_plugin_dir().mkdir(parents=True, exist_ok=True)
     target = paths.xbar_plugin_path()
+    for old in paths.xbar_plugin_dir().glob("macup.*.sh"):
+        if old.resolve() != target.resolve():
+            old.unlink(missing_ok=True)
     write_text_atomic(target, plugin_script(cli), mode=0o755)
     os.chmod(target, 0o755)
     return target

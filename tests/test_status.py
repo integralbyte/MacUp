@@ -35,28 +35,63 @@ class StatusTests(unittest.TestCase):
         cfg = default_config()
         cfg["initialized"] = True
         status = default_status()
-        with patch("macup_tool.status.manager_state.probe", return_value={"running": False}):
+        with patch("macup_tool.status.manager_state.probe", return_value={"running": False}), patch(
+            "macup_tool.status.load_restore_status_for_xbar", return_value={"state": "idle"}
+        ):
             output = xbar_output(cfg, status, "/tmp/macup")
         self.assertTrue(output.startswith("🔴 |"))
-        self.assertIn("Last: never │ Next:", output)
+        self.assertIn("Last never │ Next", output)
         self.assertNotIn("Sources:", output)
         self.assertIn("Backup Now", output)
         self.assertIn("Open Manager", output)
         self.assertIn("param1=manager param2=--detach", output)
-        self.assertNotIn("Close Manager Server", output)
+        self.assertNotIn("Close Manager", output)
         self.assertIn("color=", output)
 
     def test_xbar_marks_running_manager(self):
         cfg = default_config()
         cfg["initialized"] = True
         status = default_status()
-        with patch("macup_tool.status.manager_state.probe", return_value={"running": True}):
+        with patch("macup_tool.status.manager_state.probe", return_value={"running": True}), patch(
+            "macup_tool.status.load_restore_status_for_xbar", return_value={"state": "idle"}
+        ):
             output = xbar_output(cfg, status, "/tmp/macup")
         self.assertTrue(output.startswith("🔴 ▼ | color=#fb8c00"))
         self.assertNotIn("Manager server running", output)
-        self.assertIn("Close Manager Server", output)
+        self.assertIn("Close Manager", output)
         self.assertIn("color=#fb8c00", output)
         self.assertIn("param1=manager param2=--stop", output)
+
+    def test_xbar_shows_backup_progress(self):
+        cfg = default_config()
+        cfg["initialized"] = True
+        status = default_status()
+        status["state"] = "running"
+        status["active_run_id"] = "run"
+        status["progress_percent"] = 42.4
+        status["progress_current"] = 1
+        status["progress_total"] = 2
+        with patch("macup_tool.status.manager_state.probe", return_value={"running": False}), patch(
+            "macup_tool.status.load_restore_status_for_xbar", return_value={"state": "idle"}
+        ):
+            output = xbar_output(cfg, status, "/tmp/macup")
+        self.assertTrue(output.startswith("🟠 |"))
+        self.assertIn("Backup: 42.4% (1/2)", output)
+
+    def test_xbar_shows_restore_progress_without_changing_green_icon(self):
+        cfg = default_config()
+        cfg["initialized"] = True
+        status = default_status()
+        status["last_result"] = "success"
+        status["last_success_at"] = iso(utc_now() - timedelta(hours=1))
+        restore = {"state": "running", "progress_percent": 36, "latest_log": "/tmp/restore.log"}
+        with patch("macup_tool.status.manager_state.probe", return_value={"running": False}), patch(
+            "macup_tool.status.load_restore_status_for_xbar", return_value=restore
+        ):
+            output = xbar_output(cfg, status, "/tmp/macup")
+        self.assertTrue(output.startswith("🟢 |"))
+        self.assertIn("Restore: 36%", output)
+        self.assertIn("Restore Log", output)
 
 
 if __name__ == "__main__":

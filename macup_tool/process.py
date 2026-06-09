@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Callable, Mapping
 
 from .logutil import redact
 
@@ -28,6 +28,7 @@ def run_streamed(
     cwd: str | None = None,
     logger=None,
     check: bool = True,
+    on_line: Callable[[str], None] | None = None,
 ) -> CommandResult:
     if logger:
         logger.write(f"$ {' '.join(args)}")
@@ -46,6 +47,8 @@ def run_streamed(
         lines.append(clean)
         if logger:
             logger.write(clean)
+        if on_line:
+            on_line(clean)
     process.stdout.close()
     returncode = process.wait()
     output = "\n".join(lines)

@@ -15,7 +15,7 @@ from .config import MACUP_TAG, RUN_TAG_PREFIX, repository, rclone_config_path, u
 from .logutil import RunLogger, prune_logs
 from .process import CommandError, CommandResult, run_streamed
 from .rclone_config import rclone_bin
-from .status import is_due, load_status, mark_failed, mark_running, mark_success
+from .status import is_due, load_status, mark_backup_progress, mark_failed, mark_running, mark_success
 from .timeutil import iso
 
 
@@ -126,7 +126,7 @@ def build_backup_commands(config: dict[str, Any], run_tag: str) -> list[BackupCo
     if mode == "preserve":
         return [
             BackupCommand(
-                args=base + ["backup", "--tag", MACUP_TAG, "--tag", run_tag] + sources,
+                args=base + ["backup", "--json", "--tag", MACUP_TAG, "--tag", run_tag] + sources,
                 cwd=None,
             )
         ]
@@ -135,7 +135,7 @@ def build_backup_commands(config: dict[str, Any], run_tag: str) -> list[BackupCo
         path = Path(source)
         commands.append(
             BackupCommand(
-                args=base + ["backup", "--tag", MACUP_TAG, "--tag", run_tag, path.name],
+                args=base + ["backup", "--json", "--tag", MACUP_TAG, "--tag", run_tag, path.name],
                 cwd=str(path.parent),
             )
         )
@@ -211,6 +211,41 @@ def cleanup_failed_run(config: dict[str, Any], run_tag: str, logger: RunLogger) 
         logger.write("Failed-run snapshot cleanup did not complete.")
 
 
+def _backup_progress_from_json(line: str) -> dict[str, Any] | None:
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    message_type = data.get("message_type")
+    if message_type == "status":
+        try:
+            percent_value = None if data.get("percent_done") is None else float(data.get("percent_done")) * 100
+        except (TypeError, ValueError):
+            percent_value = None
+        return {
+            "phase": "backing_up",
+            "message": "Backing up",
+            "percent": percent_value,
+            "bytes_done": data.get("bytes_done"),
+            "total_bytes": data.get("total_bytes"),
+            "files_done": data.get("files_done"),
+            "total_files": data.get("total_files"),
+        }
+    if message_type == "summary":
+        return {
+            "phase": "backing_up",
+            "message": "Backup data written",
+            "percent": 100,
+            "bytes_done": data.get("total_bytes_processed"),
+            "total_bytes": data.get("total_bytes_processed"),
+            "files_done": data.get("total_files_processed"),
+            "total_files": data.get("total_files_processed"),
+        }
+    return None
+
+
 def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool = False) -> int:
     errors = validate_config(config, require_sources=True)
     if errors:
@@ -238,9 +273,41 @@ def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool =
             try:
                 logger.write(f"Backup run {run_id_value} started. manual={manual} due_only={due_only}")
                 prune_logs(int(config.get("log_retention_days", 14)))
+                mark_backup_progress(run_id_value, logger.path, phase="preparing", message="Preparing backup")
                 ensure_repository(config, logger)
-                for command in build_backup_commands(config, run_tag):
-                    run_streamed(command.args, cwd=command.cwd, env=restic_env(config), logger=logger, check=True)
+                commands = build_backup_commands(config, run_tag)
+                command_count = len(commands)
+                for index, command in enumerate(commands, start=1):
+                    mark_backup_progress(
+                        run_id_value,
+                        logger.path,
+                        phase="backing_up",
+                        message="Backing up",
+                        current=index,
+                        total=command_count,
+                    )
+
+                    def on_line(line: str, current=index) -> None:
+                        progress = _backup_progress_from_json(line)
+                        if not progress:
+                            return
+                        mark_backup_progress(
+                            run_id_value,
+                            logger.path,
+                            current=current,
+                            total=command_count,
+                            **progress,
+                        )
+
+                    run_streamed(
+                        command.args,
+                        cwd=command.cwd,
+                        env=restic_env(config),
+                        logger=logger,
+                        check=True,
+                        on_line=on_line,
+                    )
+                mark_backup_progress(run_id_value, logger.path, phase="pruning", message="Pruning old snapshots")
                 prune_snapshots(config, logger)
             except Exception as exc:
                 logger.write(f"Backup failed: {exc}")

@@ -17,6 +17,7 @@ class BackupPlanningTests(unittest.TestCase):
         commands = build_backup_commands(cfg, "macup-run-test")
         self.assertEqual(len(commands), 1)
         self.assertIsNone(commands[0].cwd)
+        self.assertIn("--json", commands[0].args)
         self.assertIn("/Users/example/Documents", commands[0].args)
         self.assertIn("/Users/example/Desktop", commands[0].args)
 
@@ -27,6 +28,7 @@ class BackupPlanningTests(unittest.TestCase):
         cfg["sources"] = ["/Users/example/A", "/Users/example/Other/B"]
         commands = build_backup_commands(cfg, "macup-run-test")
         self.assertEqual(len(commands), 2)
+        self.assertIn("--json", commands[0].args)
         self.assertEqual(commands[0].cwd, "/Users/example")
         self.assertIn("A", commands[0].args)
         self.assertEqual(commands[1].cwd, "/Users/example/Other")

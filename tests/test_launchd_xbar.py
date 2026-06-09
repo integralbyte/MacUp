@@ -25,9 +25,18 @@ class InstallArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"MACUP_XBAR_PLUGIN_DIR": tmp}):
                 target = xbar.install("/tmp/macup")
-                self.assertEqual(target.resolve(), (Path(tmp) / "macup.1m.sh").resolve())
+                self.assertEqual(target.resolve(), (Path(tmp) / "macup.5s.sh").resolve())
                 self.assertTrue(os.access(target, os.X_OK))
                 self.assertIn("/tmp/macup", target.read_text(encoding="utf-8"))
+
+    def test_xbar_install_removes_old_macup_plugin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"MACUP_XBAR_PLUGIN_DIR": tmp}):
+                old = Path(tmp) / "macup.1m.sh"
+                old.write_text("old", encoding="utf-8")
+                target = xbar.install("/tmp/macup")
+                self.assertTrue(target.exists())
+                self.assertFalse(old.exists())
 
 
 if __name__ == "__main__":

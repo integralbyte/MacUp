@@ -60,10 +60,9 @@ class BackupLock:
                 pid = int(data.get("pid", 0))
             except Exception:
                 pid = 0
-            if pid and not process_alive(pid):
-                self.path.unlink(missing_ok=True)
-            else:
+            if pid and process_alive(pid):
                 return False
+            self.path.unlink(missing_ok=True)
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         try:
             fd = os.open(self.path, flags, 0o600)

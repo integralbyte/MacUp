@@ -18,7 +18,7 @@ from .doctor import checks
 from .installer import install_all, is_xbar_running, open_full_disk_access_settings
 from .logutil import RunLogger
 from . import logutil
-from .restore import detach_restore
+from .restore import detach_restore, load_restore_status
 from .status import json_output, load_status, summarize
 from .timeutil import iso
 
@@ -67,7 +67,7 @@ def _question_payload(question: rclone_config.RcloneQuestion) -> dict[str, Any]:
         "option": question.option,
         "error": question.error,
         "complete": question.complete,
-        "raw": question.raw,
+        "raw": "",
     }
 
 
@@ -155,6 +155,9 @@ class ManagerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, 403)
+                return
             self._send_html()
             return
         if parsed.path.startswith("/api/") and not self._authorized():
@@ -173,6 +176,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
                     "config": cfg,
                     "status": status,
                     "summary": summarize(cfg, status),
+                    "restore": load_restore_status(),
                     "setup": _setup_state(cfg, restic_password_set),
                     "doctor": checks(),
                     "restic_password_set": restic_password_set,
@@ -183,14 +187,18 @@ class ManagerHandler(BaseHTTPRequestHandler):
             cfg = load_config()
             self._send_json({"ok": True, "status": json.loads(json_output(cfg, load_status()))})
             return
+        if parsed.path == "/api/restore/status":
+            self._send_json({"ok": True, "restore": load_restore_status()})
+            return
         if parsed.path == "/api/log/latest":
             status = load_status()
             latest = Path(str(status.get("latest_log") or ""))
             logs_root = paths.logs_dir().resolve()
             try:
                 latest_resolved = latest.expanduser().resolve()
-                if not str(latest_resolved).startswith(str(logs_root)):
-                    raise ValueError("Latest log path is outside MacUp logs.")
+                latest_resolved.relative_to(logs_root)
+                if not latest_resolved.is_file():
+                    raise ValueError("Latest log path is not a file.")
                 content = latest_resolved.read_text(encoding="utf-8", errors="replace")
                 tail = "\n".join(content.splitlines()[-120:])
             except Exception as exc:
@@ -198,8 +206,11 @@ class ManagerHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "log": logutil.redact(tail)})
             return
         if parsed.path == "/api/snapshots":
-            cfg = load_config()
-            self._send_json({"ok": True, "snapshots": snapshots.list_snapshots(cfg)})
+            try:
+                cfg = load_config()
+                self._send_json({"ok": True, "snapshots": snapshots.list_snapshots(cfg)})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
             return
         if parsed.path == "/api/snapshot":
             query = urllib.parse.parse_qs(parsed.query)
@@ -207,7 +218,10 @@ class ManagerHandler(BaseHTTPRequestHandler):
             if not snapshot_id:
                 self._send_json({"ok": False, "error": "Snapshot id is required."}, 400)
                 return
-            self._send_json({"ok": True, "detail": snapshots.snapshot_detail(load_config(), snapshot_id)})
+            try:
+                self._send_json({"ok": True, "detail": snapshots.snapshot_detail(load_config(), snapshot_id)})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
             return
         if parsed.path == "/api/snapshot/stats":
             query = urllib.parse.parse_qs(parsed.query)
@@ -215,7 +229,10 @@ class ManagerHandler(BaseHTTPRequestHandler):
             if not snapshot_id:
                 self._send_json({"ok": False, "error": "Snapshot id is required."}, 400)
                 return
-            self._send_json({"ok": True, "stats": snapshots.snapshot_stats(load_config(), snapshot_id)})
+            try:
+                self._send_json({"ok": True, "stats": snapshots.snapshot_stats(load_config(), snapshot_id)})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
             return
         self._send_json({"ok": False, "error": "Not found"}, 404)
 
@@ -308,6 +325,12 @@ class ManagerHandler(BaseHTTPRequestHandler):
                     raise ValueError("Snapshot id is required.")
                 if not parent:
                     raise ValueError("Restore destination is required.")
+                available = snapshots.list_snapshots(load_config())
+                if not any(
+                    snapshot.get("id") == snapshot_id or snapshot.get("short_id") == snapshot_id
+                    for snapshot in available
+                ):
+                    raise ValueError("Snapshot not found.")
                 detach_restore(str(paths.cli_path()), snapshot=snapshot_id, parent=parent)
                 self._send_json({"ok": True, "message": "Restore started."})
                 return
@@ -526,6 +549,7 @@ def manager_html(token: str) -> str:
       <h2>Snapshots</h2>
       <p class="muted">Details appear under each snapshot. Restore size is calculated from Restic metadata; on OneDrive it can be slow, but it does not restore the snapshot contents.</p>
       <div class="actions" style="margin-bottom:12px"><button id="refreshSnapshots">Refresh Snapshots</button></div>
+      <div id="restoreStatus" class="warning hidden"></div>
       <div id="snapshotList" class="snapshot-list muted">No snapshots loaded.</div>
     </section>
 
@@ -559,7 +583,9 @@ def manager_html(token: str) -> str:
     const token = {json.dumps(token)};
     let cfg = null;
     let lastStatus = null;
+    let lastRestore = null;
     let pollTimer = null;
+    let restorePollTimer = null;
     let snapshotsLoaded = false;
     const out = document.getElementById('output');
     const liveLog = document.getElementById('liveLog');
@@ -567,10 +593,12 @@ def manager_html(token: str) -> str:
     function setBusy(button, busy) {{
       if (!button) return;
       if (busy) {{
+        button.dataset.busy = 'true';
         button.dataset.originalText = button.textContent;
         button.textContent = 'Working...';
         button.disabled = true;
       }} else {{
+        button.dataset.busy = 'false';
         button.textContent = button.dataset.originalText || button.textContent;
         button.disabled = false;
       }}
@@ -593,6 +621,7 @@ def manager_html(token: str) -> str:
         log('Error: ' + (err && err.message ? err.message : String(err)));
       }} finally {{
         setBusy(button, false);
+        syncSnapshotDownloadButtons();
         if (button && button.id === 'backupNow' && lastStatus && lastStatus.running) {{
           button.disabled = true;
         }}
@@ -694,7 +723,7 @@ def manager_html(token: str) -> str:
         const row = document.createElement('div');
         row.className = 'source';
         const text = document.createElement('div');
-        text.innerHTML = '<strong>' + (item.repository || 'Unknown repository') + '</strong><br><span class="muted">Saved when the repository location changed.</span>';
+        text.innerHTML = '<strong>' + escapeHtml(item.repository || 'Unknown repository') + '</strong><br><span class="muted">Saved when the repository location changed.</span>';
         const use = document.createElement('button');
         use.textContent = 'Use';
         use.onclick = () => {{
@@ -715,9 +744,33 @@ def manager_html(token: str) -> str:
       warning.textContent = messages.join('\\n');
       warning.classList.toggle('hidden', messages.length === 0);
     }}
+    function renderRestoreStatus(restore) {{
+      const box = document.getElementById('restoreStatus');
+      if (!restore || !restore.state || restore.state === 'idle') {{
+        box.classList.add('hidden');
+        box.textContent = '';
+        return;
+      }}
+      const parts = [];
+      if (restore.state === 'running') parts.push('Restore running');
+      if (restore.state === 'success') parts.push('Last restore finished');
+      if (restore.state === 'failed') parts.push('Last restore failed');
+      if (restore.snapshot) parts.push('snapshot ' + String(restore.snapshot).slice(0, 8));
+      if (restore.target) parts.push('saved to ' + restore.target);
+      if (restore.last_error) parts.push(restore.last_error);
+      box.textContent = parts.join(' - ');
+      box.classList.toggle('hidden', parts.length === 0);
+    }}
+    function syncSnapshotDownloadButtons() {{
+      const restoreRunning = Boolean(lastRestore && lastRestore.state === 'running');
+      document.querySelectorAll('.download-snapshot').forEach(button => {{
+        if (button.dataset.busy !== 'true') button.disabled = restoreRunning;
+      }});
+    }}
     function render(data) {{
       cfg = data.config;
       lastStatus = data.summary;
+      lastRestore = data.restore || null;
       renderSources(cfg.sources || []);
       ['backup_interval_hours','retention_count','log_retention_days','path_mode','remote_name','repository_path','upload_limit'].forEach(id => {{
         document.getElementById(id).value = cfg[id] || '';
@@ -734,7 +787,10 @@ def manager_html(token: str) -> str:
       document.getElementById('installAll').textContent = data.setup && data.setup.installed ? 'Reinstall Scheduler and Xbar' : 'Install Scheduler and Xbar';
       renderRepositoryHistory(cfg.repository_history || []);
       renderRepositoryWarning(data);
+      renderRestoreStatus(data.restore);
       renderSetup(data);
+      syncSnapshotDownloadButtons();
+      if (data.restore && data.restore.state === 'running') startRestorePolling();
     }}
     async function refreshLog() {{
       const data = await api('/api/log/latest');
@@ -758,6 +814,22 @@ def manager_html(token: str) -> str:
             clearInterval(pollTimer);
             pollTimer = null;
             log(data.summary.failed ? 'Backup failed. Check the latest log.' : 'Backup finished.');
+          }}
+        }} catch (err) {{
+          log('Error: ' + err.message);
+        }}
+      }}, 2500);
+    }}
+    function startRestorePolling() {{
+      if (restorePollTimer) return;
+      restorePollTimer = setInterval(async () => {{
+        try {{
+          const data = await refresh();
+          if (!data.restore || data.restore.state !== 'running') {{
+            clearInterval(restorePollTimer);
+            restorePollTimer = null;
+            if (data.restore && data.restore.state === 'success') log('Restore finished: ' + (data.restore.target || 'target folder recorded in restore log.'));
+            if (data.restore && data.restore.state === 'failed') log('Restore failed: ' + (data.restore.last_error || 'check restore log.'));
           }}
         }} catch (err) {{
           log('Error: ' + err.message);
@@ -856,7 +928,8 @@ def manager_html(token: str) -> str:
         details.textContent = 'Details';
         const download = document.createElement('button');
         download.textContent = 'Download';
-        download.className = 'primary';
+        download.className = 'primary download-snapshot';
+        download.disabled = Boolean(lastRestore && lastRestore.state === 'running');
         const detailBox = document.createElement('div');
         detailBox.className = 'snapshot-detail log hidden';
         details.onclick = () => runAction(async () => showSnapshot(snapshot, detailBox), details);
@@ -868,15 +941,31 @@ def manager_html(token: str) -> str:
       }});
     }}
     async function loadSnapshots() {{
-      const data = await api('/api/snapshots');
-      snapshotsLoaded = true;
-      renderSnapshots(data.snapshots || []);
+      const box = document.getElementById('snapshotList');
+      box.classList.add('muted');
+      box.textContent = 'Loading snapshots...';
+      try {{
+        const data = await api('/api/snapshots');
+        snapshotsLoaded = true;
+        renderSnapshots(data.snapshots || []);
+      }} catch (err) {{
+        snapshotsLoaded = false;
+        box.classList.add('muted');
+        box.textContent = 'Snapshot list unavailable: ' + (err && err.message ? err.message : String(err));
+        throw err;
+      }}
     }}
     async function showSnapshot(snapshot, box) {{
       box.classList.remove('hidden');
       box.textContent = snapshotBaseDetail(snapshot) + '\\n\\nRestore size: calculating metadata...';
       const id = snapshot.id || snapshot.short_id;
-      const data = await api('/api/snapshot/stats?id=' + encodeURIComponent(id));
+      let data;
+      try {{
+        data = await api('/api/snapshot/stats?id=' + encodeURIComponent(id));
+      }} catch (err) {{
+        box.textContent = snapshotBaseDetail(snapshot) + '\\n\\nRestore size unavailable: ' + (err && err.message ? err.message : String(err));
+        return;
+      }}
       const stats = data.stats || {{}};
       const lines = [
         snapshotBaseDetail(snapshot),
@@ -893,6 +982,8 @@ def manager_html(token: str) -> str:
       if (!picked.folder) throw new Error('No restore destination selected.');
       await api('/api/snapshot/restore', {{method:'POST', body:{{snapshot:id, parent:picked.folder}}}});
       log('Restore started. MacUp will restore into a new folder inside: ' + picked.folder);
+      await refresh();
+      startRestorePolling();
     }}
     document.getElementById('pickFolders').onclick = event => runAction(async () => {{
       const data = await api('/api/folders/pick', {{method:'POST', body:{{}}}});

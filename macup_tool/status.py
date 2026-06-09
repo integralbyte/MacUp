@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 import shlex
 from datetime import timedelta
 from pathlib import Path
@@ -33,8 +34,13 @@ def load_status() -> dict[str, Any]:
     path = paths.status_path()
     if not path.exists():
         return default_status()
-    with path.open("r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except json.JSONDecodeError:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
+        path.replace(path.with_name(f"{path.name}.corrupt-{stamp}"))
+        return default_status()
     status = default_status()
     status.update(loaded)
     return status
@@ -44,7 +50,7 @@ def save_status(status: dict[str, Any]) -> dict[str, Any]:
     current = default_status()
     current.update(status)
     paths.ensure_base_dirs()
-    write_json_atomic(paths.status_path(), current)
+    write_json_atomic(paths.status_path(), current, mode=0o600)
     return current
 
 

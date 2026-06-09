@@ -26,6 +26,6 @@ def write_text_atomic(path: Path, content: str, mode: int | None = None) -> None
             pass
 
 
-def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+def write_json_atomic(path: Path, data: dict[str, Any], mode: int | None = None) -> None:
     content = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    write_text_atomic(path, content)
+    write_text_atomic(path, content, mode=mode)

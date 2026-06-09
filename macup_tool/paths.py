@@ -40,6 +40,10 @@ def status_path() -> Path:
     return state_dir() / "status.json"
 
 
+def restore_status_path() -> Path:
+    return state_dir() / "restore-status.json"
+
+
 def manager_state_path() -> Path:
     return state_dir() / "manager.json"
 
@@ -50,6 +54,10 @@ def snapshot_stats_cache_path() -> Path:
 
 def lock_path() -> Path:
     return state_dir() / "backup.lock"
+
+
+def restore_lock_path() -> Path:
+    return state_dir() / "restore.lock"
 
 
 def default_rclone_config_path() -> Path:

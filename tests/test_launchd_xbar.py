@@ -19,6 +19,7 @@ class InstallArtifactTests(unittest.TestCase):
         self.assertIn("status --format xbar", script)
         self.assertIn("MACUP_CLI='/tmp/macup'", script)
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", script)
+        self.assertIn("MacUp status failed", script)
 
     def test_xbar_install_writes_executable_plugin(self):
         with tempfile.TemporaryDirectory() as tmp:

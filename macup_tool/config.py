@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ DEFAULT_REMOTE_NAME = "macup-onedrive"
 DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_RETENTION_COUNT = 14
 DEFAULT_LOG_RETENTION_DAYS = 14
+REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def host_name() -> str:
@@ -47,8 +49,13 @@ def load_config() -> dict[str, Any]:
     path = paths.config_path()
     if not path.exists():
         return default_config()
-    with path.open("r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except json.JSONDecodeError:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
+        path.replace(path.with_name(f"{path.name}.corrupt-{stamp}"))
+        return default_config()
     cfg = default_config()
     cfg.update(loaded)
     cfg["version"] = CONFIG_VERSION
@@ -63,7 +70,7 @@ def save_config(config: dict[str, Any]) -> dict[str, Any]:
     if errors:
         raise ValueError("; ".join(errors))
     paths.ensure_base_dirs()
-    write_json_atomic(paths.config_path(), cfg)
+    write_json_atomic(paths.config_path(), cfg, mode=0o600)
     return cfg
 
 
@@ -130,6 +137,10 @@ def validate_config(config: dict[str, Any], require_sources: bool = True) -> lis
         path = Path(source).expanduser()
         if not path.is_absolute():
             errors.append(f"source must be an absolute path: {source}")
+        elif require_sources and not path.exists():
+            errors.append(f"source folder does not exist: {source}")
+        elif require_sources and not path.is_dir():
+            errors.append(f"source must be a folder: {source}")
     if path_mode == "flat":
         basenames: dict[str, str] = {}
         for source in sources:
@@ -141,6 +152,24 @@ def validate_config(config: dict[str, Any], require_sources: bool = True) -> lis
                 )
             else:
                 basenames[name] = source
+
+    repo_override = str(config.get("repository") or "").strip()
+    if not repo_override:
+        remote_name = str(config.get("remote_name") or "").strip()
+        repo_path_raw = str(config.get("repository_path") or "").strip()
+        repo_parts = [part for part in repo_path_raw.split("/") if part]
+        if not remote_name:
+            errors.append("remote name is required")
+        elif not REMOTE_NAME_RE.fullmatch(remote_name):
+            errors.append("remote name can only contain letters, numbers, dots, underscores, and hyphens")
+        if not repo_path_raw:
+            errors.append("repository path is required")
+        elif repo_path_raw.startswith("/"):
+            errors.append("repository path must be relative, for example MacUp/hostname/restic")
+        elif "\\" in repo_path_raw or "\x00" in repo_path_raw:
+            errors.append("repository path contains invalid characters")
+        elif any(part in {".", ".."} for part in repo_parts):
+            errors.append("repository path cannot contain . or .. segments")
 
     if not repository(config):
         errors.append("repository is required")

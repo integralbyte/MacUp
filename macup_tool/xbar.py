@@ -19,7 +19,16 @@ def plugin_script(cli: str | None = None) -> str:
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 export PYTHONDONTWRITEBYTECODE=1
 MACUP_CLI={_bash_quote(cli_path)}
-exec "$MACUP_CLI" status --format xbar --xbar-cli "$MACUP_CLI"
+OUTPUT="$("$MACUP_CLI" status --format xbar --xbar-cli "$MACUP_CLI" 2>&1)"
+STATUS=$?
+if [ "$STATUS" -ne 0 ]; then
+  echo "🔴 | color=#d1242f"
+  echo "---"
+  echo "MacUp status failed | color=#d1242f"
+  echo "$OUTPUT" | head -n 6 | sed 's/|/\\//g; s/$/ | disabled=true/'
+  exit 0
+fi
+printf "%s\\n" "$OUTPUT"
 """
 
 

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from macup_tool.backup import build_backup_commands, snapshot_ids_to_forget
+from macup_tool.backup import BackupLock, build_backup_commands, snapshot_ids_to_forget
 from macup_tool.config import default_config
 from macup_tool.logutil import prune_logs
 
@@ -56,6 +56,14 @@ class BackupPlanningTests(unittest.TestCase):
                 self.assertIn(old.resolve(), [path.resolve() for path in removed])
                 self.assertFalse(old.exists())
                 self.assertTrue(new.exists())
+
+    def test_malformed_lock_does_not_block_forever(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "backup.lock"
+            lock_path.write_text("{not json", encoding="utf-8")
+            lock = BackupLock(lock_path)
+            self.assertTrue(lock.acquire("run"))
+            lock.release()
 
 
 if __name__ == "__main__":

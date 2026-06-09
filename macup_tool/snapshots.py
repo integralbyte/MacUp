@@ -6,7 +6,7 @@ from typing import Any
 from . import paths
 from .atomic import write_json_atomic
 from .backup import restic_base_args, restic_env
-from .config import MACUP_TAG, RUN_TAG_PREFIX
+from .config import MACUP_TAG, RUN_TAG_PREFIX, repository
 from .process import run_streamed
 from .timeutil import relative_display
 
@@ -66,9 +66,7 @@ def list_snapshots(config: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _cache_key(config: dict[str, Any], snapshot_id: str) -> str:
-    repo = str(config.get("repository") or config.get("repository_path") or "")
-    remote = str(config.get("remote_name") or "")
-    return f"{remote}|{repo}|{snapshot_id}"
+    return f"{repository(config)}|{snapshot_id}"
 
 
 def _read_stats_cache() -> dict[str, Any]:
@@ -85,7 +83,7 @@ def _read_stats_cache() -> dict[str, Any]:
 
 def _write_stats_cache(cache: dict[str, Any]) -> None:
     paths.ensure_base_dirs()
-    write_json_atomic(paths.snapshot_stats_cache_path(), cache)
+    write_json_atomic(paths.snapshot_stats_cache_path(), cache, mode=0o600)
 
 
 def snapshot_stats(config: dict[str, Any], snapshot_id: str, *, use_cache: bool = True) -> dict[str, Any]:

@@ -1,0 +1,25 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Local runtime/config/state. These may contain machine-specific paths,
+# repository names, logs, OAuth state, or encrypted rclone config.
+.config/
+.local/
+config.json
+status.json
+manager.json
+rclone.conf
+*.log
+
+# Local copy of the third-party Xbar app/source used during development.
+xbar (use what you need)/
+*.dmg

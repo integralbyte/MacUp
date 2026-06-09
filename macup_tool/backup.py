@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import signal
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from . import keychain, paths
+from .config import MACUP_TAG, RUN_TAG_PREFIX, repository, rclone_config_path, upload_limit, validate_config
+from .logutil import RunLogger, prune_logs
+from .process import CommandError, CommandResult, run_streamed
+from .rclone_config import rclone_bin
+from .status import is_due, load_status, mark_failed, mark_running, mark_success
+from .timeutil import iso
+
+
+class BackupError(RuntimeError):
+    pass
+
+
+@dataclass
+class BackupCommand:
+    args: list[str]
+    cwd: str | None = None
+
+
+def restic_bin() -> str:
+    return os.environ.get("MACUP_RESTIC_BIN") or shutil.which("restic") or "restic"
+
+
+def run_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class BackupLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.acquired = False
+
+    def acquire(self, run_id_value: str) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                pid = int(data.get("pid", 0))
+            except Exception:
+                pid = 0
+            if pid and not process_alive(pid):
+                self.path.unlink(missing_ok=True)
+            else:
+                return False
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"pid": os.getpid(), "run_id": run_id_value, "created_at": iso()}, handle)
+        self.acquired = True
+        return True
+
+    def release(self) -> None:
+        if self.acquired:
+            self.path.unlink(missing_ok=True)
+            self.acquired = False
+
+    def __enter__(self) -> "BackupLock":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+
+def restic_env(config: dict[str, Any]) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + env.get("PATH", "")
+    env["RESTIC_REPOSITORY"] = repository(config)
+    if str(env["RESTIC_REPOSITORY"]).startswith("rclone:"):
+        env["RCLONE_CONFIG"] = str(rclone_config_path(config))
+        if os.environ.get("MACUP_RCLONE_CONFIG_PASS"):
+            env["RCLONE_CONFIG_PASS"] = os.environ["MACUP_RCLONE_CONFIG_PASS"]
+        elif os.environ.get("MACUP_RCLONE_PASSWORD_COMMAND"):
+            env["RCLONE_PASSWORD_COMMAND"] = os.environ["MACUP_RCLONE_PASSWORD_COMMAND"]
+        else:
+            env["RCLONE_PASSWORD_COMMAND"] = keychain.rclone_password_command()
+    limit = upload_limit(config)
+    if limit:
+        env["RCLONE_BWLIMIT"] = limit
+
+    if os.environ.get("MACUP_RESTIC_PASSWORD"):
+        env["RESTIC_PASSWORD"] = os.environ["MACUP_RESTIC_PASSWORD"]
+    elif os.environ.get("MACUP_RESTIC_PASSWORD_COMMAND"):
+        env["RESTIC_PASSWORD_COMMAND"] = os.environ["MACUP_RESTIC_PASSWORD_COMMAND"]
+    else:
+        if keychain.find_password(keychain.RESTIC_SERVICE, keychain.RESTIC_ACCOUNT) is None:
+            raise BackupError("Restic password is not stored in Keychain. Open the manager and save it first.")
+        env["RESTIC_PASSWORD_COMMAND"] = keychain.restic_password_command()
+    return env
+
+
+def restic_base_args(config: dict[str, Any]) -> list[str]:
+    args = [restic_bin()]
+    if repository(config).startswith("rclone:"):
+        args.extend(["-o", f"rclone.program={rclone_bin()}"])
+    return args
+
+
+def build_backup_commands(config: dict[str, Any], run_tag: str) -> list[BackupCommand]:
+    sources = [str(Path(source).expanduser()) for source in config.get("sources", [])]
+    mode = config.get("path_mode", "preserve")
+    base = restic_base_args(config)
+    if mode == "preserve":
+        return [
+            BackupCommand(
+                args=base + ["backup", "--tag", MACUP_TAG, "--tag", run_tag] + sources,
+                cwd=None,
+            )
+        ]
+    commands: list[BackupCommand] = []
+    for source in sources:
+        path = Path(source)
+        commands.append(
+            BackupCommand(
+                args=base + ["backup", "--tag", MACUP_TAG, "--tag", run_tag, path.name],
+                cwd=str(path.parent),
+            )
+        )
+    return commands
+
+
+def run_restic(config: dict[str, Any], args: list[str], logger=None, check: bool = True) -> CommandResult:
+    return run_streamed(restic_base_args(config) + args, env=restic_env(config), logger=logger, check=check)
+
+
+def ensure_repository(config: dict[str, Any], logger: RunLogger) -> None:
+    probe = run_restic(config, ["snapshots", "--json"], logger=logger, check=False)
+    if probe.returncode == 0:
+        return
+    logger.write("Repository probe failed; trying restic init.")
+    init = run_restic(config, ["init"], logger=logger, check=False)
+    if init.returncode != 0:
+        raise BackupError(
+            "Unable to open or initialize Restic repository. "
+            f"Probe output: {probe.output[-1000:]} Init output: {init.output[-1000:]}"
+        )
+
+
+def _run_tags(snapshot: dict[str, Any]) -> list[str]:
+    tags = snapshot.get("tags") or []
+    if not isinstance(tags, list):
+        return []
+    return [tag for tag in tags if isinstance(tag, str) and tag.startswith(RUN_TAG_PREFIX)]
+
+
+def snapshot_ids_to_forget(snapshots: list[dict[str, Any]], keep_runs: int) -> list[str]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshots:
+        if MACUP_TAG not in (snapshot.get("tags") or []):
+            continue
+        run_tags = _run_tags(snapshot)
+        if not run_tags:
+            continue
+        run_tag = run_tags[0]
+        group = grouped.setdefault(run_tag, {"time": "", "ids": []})
+        group["ids"].append(snapshot.get("id") or snapshot.get("short_id"))
+        if str(snapshot.get("time") or "") > group["time"]:
+            group["time"] = str(snapshot.get("time") or "")
+    ordered = sorted(grouped.items(), key=lambda item: item[1]["time"], reverse=True)
+    old = ordered[max(keep_runs, 0) :]
+    ids: list[str] = []
+    for _, group in old:
+        ids.extend([snapshot_id for snapshot_id in group["ids"] if snapshot_id])
+    return ids
+
+
+def prune_snapshots(config: dict[str, Any], logger: RunLogger) -> None:
+    keep_runs = int(config.get("retention_count", 14))
+    result = run_restic(config, ["snapshots", "--json", "--tag", MACUP_TAG], logger=logger, check=False)
+    if result.returncode != 0:
+        logger.write("Skipping snapshot pruning because snapshot listing failed.")
+        return
+    try:
+        snapshots = json.loads(result.output or "[]")
+    except json.JSONDecodeError:
+        logger.write("Skipping snapshot pruning because Restic JSON could not be parsed.")
+        return
+    ids = snapshot_ids_to_forget(snapshots, keep_runs)
+    if not ids:
+        logger.write("No old MacUp snapshots to prune.")
+        return
+    run_restic(config, ["forget"] + ids + ["--prune"], logger=logger, check=True)
+
+
+def cleanup_failed_run(config: dict[str, Any], run_tag: str, logger: RunLogger) -> None:
+    result = run_restic(config, ["forget", "--tag", run_tag, "--prune"], logger=logger, check=False)
+    if result.returncode != 0:
+        logger.write("Failed-run snapshot cleanup did not complete.")
+
+
+def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool = False) -> int:
+    errors = validate_config(config, require_sources=True)
+    if errors:
+        raise BackupError("; ".join(errors))
+    current_status = load_status()
+    if due_only and not is_due(config, current_status):
+        print("Backup is not due.")
+        return 0
+    if not config.get("initialized"):
+        raise BackupError(
+            "Restic repository is not initialized for the configured location. "
+            "Open the manager and initialize/probe the repository before running backups."
+        )
+
+    run_id_value = run_id()
+    run_tag = f"{RUN_TAG_PREFIX}{run_id_value}"
+    lock = BackupLock(paths.lock_path())
+    if not lock.acquire(run_id_value):
+        print("A backup is already running.")
+        return 0
+
+    with lock:
+        with RunLogger(run_id_value) as logger:
+            mark_running(run_id_value, logger.path)
+            try:
+                logger.write(f"Backup run {run_id_value} started. manual={manual} due_only={due_only}")
+                prune_logs(int(config.get("log_retention_days", 14)))
+                ensure_repository(config, logger)
+                for command in build_backup_commands(config, run_tag):
+                    run_streamed(command.args, cwd=command.cwd, env=restic_env(config), logger=logger, check=True)
+                prune_snapshots(config, logger)
+            except Exception as exc:
+                logger.write(f"Backup failed: {exc}")
+                try:
+                    cleanup_failed_run(config, run_tag, logger)
+                except Exception as cleanup_exc:
+                    logger.write(f"Failed-run cleanup error: {cleanup_exc}")
+                mark_failed(run_id_value, logger.path, str(exc))
+                raise
+            mark_success(run_id_value, logger.path)
+            logger.write(f"Backup run {run_id_value} completed successfully.")
+    return 0
+
+
+def detach_backup(cli: str | None = None) -> int:
+    cli_path = cli or str(paths.cli_path())
+    subprocess.Popen(
+        [cli_path, "backup", "--manual"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
+    print("Backup started.")
+    return 0

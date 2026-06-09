@@ -57,3 +57,7 @@ In the manager:
 - Xbar plugin: `~/Library/Application Support/xbar/plugins/macup.1m.sh`
 
 Restic and rclone secrets are stored in macOS Keychain.
+
+## Robustness
+
+See [docs/EDGE_CASE_AUDIT.md](docs/EDGE_CASE_AUDIT.md) for the current edge-case audit and known gaps.

@@ -44,6 +44,10 @@ def manager_state_path() -> Path:
     return state_dir() / "manager.json"
 
 
+def snapshot_stats_cache_path() -> Path:
+    return state_dir() / "snapshot-stats-cache.json"
+
+
 def lock_path() -> Path:
     return state_dir() / "backup.lock"
 

@@ -18,6 +18,7 @@ from .doctor import checks
 from .installer import install_all, is_xbar_running, open_full_disk_access_settings
 from .logutil import RunLogger
 from . import logutil
+from .restore import detach_restore
 from .status import json_output, load_status, summarize
 from .timeutil import iso
 
@@ -41,6 +42,23 @@ return outputText
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Folder picker was cancelled.")
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def pick_restore_destination() -> str:
+    script = """
+set chosenFolder to choose folder with prompt "Choose where MacUp should restore this snapshot"
+return POSIX path of chosenFolder
+"""
+    result = subprocess.run(
+        ["/usr/bin/osascript", "-e", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Restore destination picker was cancelled.")
+    return result.stdout.strip()
 
 
 def _question_payload(question: rclone_config.RcloneQuestion) -> dict[str, Any]:
@@ -101,7 +119,10 @@ class ManagerHandler(BaseHTTPRequestHandler):
     server: "ManagerServer"
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[manager] {self.address_string()} - {fmt % args}")
+        message = fmt % args
+        message = logutil.redact(message)
+        message = message.replace(f"token={self.server.token}", "token=REDACTED")
+        print(f"[manager] {self.address_string()} - {message}")
 
     def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
         body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
@@ -188,6 +209,14 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "detail": snapshots.snapshot_detail(load_config(), snapshot_id)})
             return
+        if parsed.path == "/api/snapshot/stats":
+            query = urllib.parse.parse_qs(parsed.query)
+            snapshot_id = str((query.get("id") or [""])[0])
+            if not snapshot_id:
+                self._send_json({"ok": False, "error": "Snapshot id is required."}, 400)
+                return
+            self._send_json({"ok": True, "stats": snapshots.snapshot_stats(load_config(), snapshot_id)})
+            return
         self._send_json({"ok": False, "error": "Not found"}, 404)
 
     def do_POST(self) -> None:
@@ -221,6 +250,9 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/folders/pick":
                 self._send_json({"ok": True, "folders": pick_folders()})
+                return
+            if parsed.path == "/api/restore/pick":
+                self._send_json({"ok": True, "folder": pick_restore_destination()})
                 return
             if parsed.path == "/api/rclone/start":
                 question = rclone_config.start_onedrive_flow(load_config())
@@ -268,6 +300,16 @@ class ManagerHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/backup-now":
                 detach_backup(str(paths.cli_path()))
                 self._send_json({"ok": True})
+                return
+            if parsed.path == "/api/snapshot/restore":
+                snapshot_id = str(body.get("snapshot") or "")
+                parent = str(body.get("parent") or "")
+                if not snapshot_id:
+                    raise ValueError("Snapshot id is required.")
+                if not parent:
+                    raise ValueError("Restore destination is required.")
+                detach_restore(str(paths.cli_path()), snapshot=snapshot_id, parent=parent)
+                self._send_json({"ok": True, "message": "Restore started."})
                 return
             if parsed.path == "/api/shutdown":
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -403,9 +445,12 @@ def manager_html(token: str) -> str:
     .spinner {{ width: 13px; height: 13px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; display: none; }}
     .busy .spinner {{ display: inline-block; }}
     @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-    .snapshot-list {{ display: grid; gap: 8px; }}
-    .snapshot-item {{ display: grid; gap: 4px; text-align: left; width: 100%; }}
-    .snapshot-item strong, .snapshot-detail strong {{ overflow-wrap: anywhere; }}
+    .snapshot-list {{ display: grid; gap: 10px; }}
+    .snapshot-card {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; display: grid; gap: 8px; }}
+    .snapshot-main {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }}
+    .snapshot-title {{ display: grid; gap: 3px; min-width: 0; }}
+    .snapshot-title strong, .snapshot-detail strong {{ overflow-wrap: anywhere; }}
+    .snapshot-actions {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
     .repo-history {{ display: grid; gap: 8px; margin-top: 12px; }}
     .log {{ min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; border: 1px solid var(--line); border-radius: 6px; padding: 10px; max-height: 280px; overflow: auto; color: var(--muted); }}
     @media (max-width: 720px) {{ .status-grid {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; gap: 10px; flex-direction: column; }} }}
@@ -477,6 +522,23 @@ def manager_html(token: str) -> str:
       <div id="rcloneQuestion" style="margin-top:12px"></div>
     </section>
 
+    <section id="snapshotsSection" data-normal>
+      <h2>Snapshots</h2>
+      <p class="muted">Details appear under each snapshot. Restore size is calculated from Restic metadata; on OneDrive it can be slow, but it does not restore the snapshot contents.</p>
+      <div class="actions" style="margin-bottom:12px"><button id="refreshSnapshots">Refresh Snapshots</button></div>
+      <div id="snapshotList" class="snapshot-list muted">No snapshots loaded.</div>
+    </section>
+
+    <section id="outputSection">
+      <h2>Output</h2>
+      <div id="output" class="log">Ready.</div>
+    </section>
+
+    <section id="latestLogSection" data-normal>
+      <h2>Latest Backup Log</h2>
+      <div id="liveLog" class="log">No log yet.</div>
+    </section>
+
     <section id="advancedSection" data-normal>
       <h2>Advanced Settings</h2>
       <details id="advancedDetails">
@@ -491,23 +553,6 @@ def manager_html(token: str) -> str:
         </div>
         <div id="repoHistory" class="repo-history"></div>
       </details>
-    </section>
-
-    <section id="snapshotsSection" data-normal>
-      <h2>Snapshots</h2>
-      <div class="actions" style="margin-bottom:12px"><button id="refreshSnapshots">Refresh Snapshots</button></div>
-      <div id="snapshotList" class="snapshot-list muted">No snapshots loaded.</div>
-      <div id="snapshotDetail" class="snapshot-detail log hidden"></div>
-    </section>
-
-    <section id="outputSection">
-      <h2>Output</h2>
-      <div id="output" class="log">Ready.</div>
-    </section>
-
-    <section id="latestLogSection" data-normal>
-      <h2>Latest Backup Log</h2>
-      <div id="liveLog" class="log">No log yet.</div>
     </section>
   </main>
   <script>
@@ -770,9 +815,23 @@ def manager_html(token: str) -> str:
         box.append(input, b);
       }}
     }}
+    function escapeHtml(value) {{
+      return String(value || '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
+    }}
     function snapshotSummary(snapshot) {{
       const paths = Array.isArray(snapshot.paths) ? snapshot.paths.join(', ') : '';
       return (snapshot.when || 'unknown time') + (paths ? ' - ' + paths : '');
+    }}
+    function snapshotBaseDetail(snapshot) {{
+      const paths = Array.isArray(snapshot.paths) ? snapshot.paths.join('\\n') : '';
+      const tags = Array.isArray(snapshot.tags) ? snapshot.tags.join(', ') : '';
+      return [
+        'Snapshot: ' + (snapshot.short_id || snapshot.id || ''),
+        'Backed up: ' + (snapshot.when || 'unknown'),
+        snapshot.hostname ? 'Host: ' + snapshot.hostname : '',
+        tags ? 'Tags: ' + tags : '',
+        paths ? 'Paths:\\n' + paths : ''
+      ].filter(Boolean).join('\\n');
     }}
     function renderSnapshots(items) {{
       const box = document.getElementById('snapshotList');
@@ -783,12 +842,29 @@ def manager_html(token: str) -> str:
         return;
       }}
       items.forEach(snapshot => {{
-        const button = document.createElement('button');
-        button.className = 'snapshot-item';
+        const card = document.createElement('div');
+        card.className = 'snapshot-card';
+        const main = document.createElement('div');
+        main.className = 'snapshot-main';
+        const title = document.createElement('div');
+        title.className = 'snapshot-title';
         const id = snapshot.short_id || snapshot.id || '';
-        button.innerHTML = '<strong>' + id + '</strong><span class="muted">' + snapshotSummary(snapshot) + '</span>';
-        button.onclick = () => runAction(async () => showSnapshot(snapshot.id || snapshot.short_id), button);
-        box.append(button);
+        title.innerHTML = '<strong>' + escapeHtml(id) + '</strong><span class="muted">' + escapeHtml(snapshotSummary(snapshot)) + '</span>';
+        const actions = document.createElement('div');
+        actions.className = 'snapshot-actions';
+        const details = document.createElement('button');
+        details.textContent = 'Details';
+        const download = document.createElement('button');
+        download.textContent = 'Download';
+        download.className = 'primary';
+        const detailBox = document.createElement('div');
+        detailBox.className = 'snapshot-detail log hidden';
+        details.onclick = () => runAction(async () => showSnapshot(snapshot, detailBox), details);
+        download.onclick = () => runAction(async () => downloadSnapshot(snapshot), download);
+        actions.append(details, download);
+        main.append(title, actions);
+        card.append(main, detailBox);
+        box.append(card);
       }});
     }}
     async function loadSnapshots() {{
@@ -796,25 +872,27 @@ def manager_html(token: str) -> str:
       snapshotsLoaded = true;
       renderSnapshots(data.snapshots || []);
     }}
-    async function showSnapshot(id) {{
-      const data = await api('/api/snapshot?id=' + encodeURIComponent(id));
-      const detail = data.detail;
-      const snapshot = detail.snapshot || {{}};
-      const paths = Array.isArray(snapshot.paths) ? snapshot.paths.join('\\n') : '';
-      const tags = Array.isArray(snapshot.tags) ? snapshot.tags.join(', ') : '';
-      const lines = [
-        'Snapshot: ' + (snapshot.short_id || snapshot.id || id),
-        'Backed up: ' + (snapshot.when || 'unknown'),
-        'Restore size: ' + (detail.restore_size_display || 'unknown'),
-        detail.file_count ? 'Files: ' + detail.file_count : '',
-        snapshot.hostname ? 'Host: ' + snapshot.hostname : '',
-        tags ? 'Tags: ' + tags : '',
-        paths ? 'Paths:\\n' + paths : '',
-        detail.stats_error ? 'Stats error: ' + detail.stats_error : ''
-      ].filter(Boolean);
-      const box = document.getElementById('snapshotDetail');
+    async function showSnapshot(snapshot, box) {{
       box.classList.remove('hidden');
+      box.textContent = snapshotBaseDetail(snapshot) + '\\n\\nRestore size: calculating metadata...';
+      const id = snapshot.id || snapshot.short_id;
+      const data = await api('/api/snapshot/stats?id=' + encodeURIComponent(id));
+      const stats = data.stats || {{}};
+      const lines = [
+        snapshotBaseDetail(snapshot),
+        '',
+        'Restore size: ' + (stats.restore_size_display || 'unknown') + (stats.cached ? ' (cached)' : ''),
+        stats.file_count ? 'Files: ' + stats.file_count : '',
+        stats.stats_error ? 'Stats error: ' + stats.stats_error : ''
+      ].filter(line => line !== null && line !== undefined);
       box.textContent = lines.join('\\n');
+    }}
+    async function downloadSnapshot(snapshot) {{
+      const id = snapshot.id || snapshot.short_id;
+      const picked = await api('/api/restore/pick', {{method:'POST', body:{{}}}});
+      if (!picked.folder) throw new Error('No restore destination selected.');
+      await api('/api/snapshot/restore', {{method:'POST', body:{{snapshot:id, parent:picked.folder}}}});
+      log('Restore started. MacUp will restore into a new folder inside: ' + picked.folder);
     }}
     document.getElementById('pickFolders').onclick = event => runAction(async () => {{
       const data = await api('/api/folders/pick', {{method:'POST', body:{{}}}});

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import paths
+from .atomic import write_json_atomic
 from .backup import restic_base_args, restic_env
 from .config import MACUP_TAG, RUN_TAG_PREFIX
 from .process import run_streamed
@@ -63,19 +65,36 @@ def list_snapshots(config: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(snapshots, key=lambda item: str(item.get("time") or ""), reverse=True)
 
 
-def snapshot_detail(config: dict[str, Any], snapshot_id: str) -> dict[str, Any]:
-    snapshots = list_snapshots(config)
-    selected = next(
-        (
-            snapshot
-            for snapshot in snapshots
-            if snapshot.get("id") == snapshot_id or snapshot.get("short_id") == snapshot_id
-        ),
-        None,
-    )
-    if selected is None:
-        raise ValueError(f"Snapshot not found: {snapshot_id}")
+def _cache_key(config: dict[str, Any], snapshot_id: str) -> str:
+    repo = str(config.get("repository") or config.get("repository_path") or "")
+    remote = str(config.get("remote_name") or "")
+    return f"{remote}|{repo}|{snapshot_id}"
 
+
+def _read_stats_cache() -> dict[str, Any]:
+    path = paths.snapshot_stats_cache_path()
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_stats_cache(cache: dict[str, Any]) -> None:
+    paths.ensure_base_dirs()
+    write_json_atomic(paths.snapshot_stats_cache_path(), cache)
+
+
+def snapshot_stats(config: dict[str, Any], snapshot_id: str, *, use_cache: bool = True) -> dict[str, Any]:
+    key = _cache_key(config, snapshot_id)
+    if use_cache:
+        cached = _read_stats_cache().get(key)
+        if isinstance(cached, dict):
+            cached["cached"] = True
+            return cached
     stats = {}
     result = run_streamed(
         restic_base_args(config) + ["stats", "--json", "--mode", "restore-size", snapshot_id],
@@ -90,11 +109,34 @@ def snapshot_detail(config: dict[str, Any], snapshot_id: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             stats = {}
     total_size = stats.get("total_size")
-    return {
-        "snapshot": selected,
+    detail = {
         "stats": stats,
         "restore_size": total_size,
         "restore_size_display": format_bytes(total_size),
         "file_count": stats.get("total_file_count"),
         "stats_error": "" if result.returncode == 0 else result.output[-1000:],
+        "cached": False,
     }
+    if result.returncode == 0:
+        cache = _read_stats_cache()
+        cache[key] = detail
+        _write_stats_cache(cache)
+    return detail
+
+
+def snapshot_detail(config: dict[str, Any], snapshot_id: str) -> dict[str, Any]:
+    snapshots = list_snapshots(config)
+    selected = next(
+        (
+            snapshot
+            for snapshot in snapshots
+            if snapshot.get("id") == snapshot_id or snapshot.get("short_id") == snapshot_id
+        ),
+        None,
+    )
+    if selected is None:
+        raise ValueError(f"Snapshot not found: {snapshot_id}")
+
+    detail = snapshot_stats(config, str(selected.get("id") or snapshot_id))
+    detail["snapshot"] = selected
+    return detail

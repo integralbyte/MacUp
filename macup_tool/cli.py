@@ -11,7 +11,7 @@ from .config import load_config, save_config
 from .doctor import text_report
 from .installer import install_all
 from .manager import detach_manager, run_manager, stop_running_manager
-from .restore import restore_snapshot, snapshot_table
+from .restore import detach_restore, restore_job, restore_snapshot, snapshot_table
 from .status import json_output, load_status, text_output, xbar_output
 
 
@@ -93,6 +93,11 @@ def _cmd_restore(args) -> int:
     if not args.target:
         print("--target is required unless --list is used", file=sys.stderr)
         return 2
+    if args.download:
+        restore_job(cfg, snapshot=args.snapshot, parent=args.target)
+        return 0
+    if args.detach:
+        return detach_restore(str(paths.cli_path()), snapshot=args.snapshot, parent=args.target)
     return restore_snapshot(cfg, snapshot=args.snapshot, target=args.target, include_paths=args.path)
 
 
@@ -144,6 +149,8 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--snapshot", default="latest")
     restore.add_argument("--target", default="")
     restore.add_argument("--path", action="append", default=[])
+    restore.add_argument("--download", action="store_true", help="restore into a new MacUp Restore folder under --target")
+    restore.add_argument("--detach", action="store_true", help="start restore in the background")
     restore.set_defaults(func=_cmd_restore)
 
     return parser

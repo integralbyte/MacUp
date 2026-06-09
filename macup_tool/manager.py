@@ -561,6 +561,18 @@ def manager_html(token: str) -> str:
     .snapshot-title {{ display: grid; gap: 3px; min-width: 0; }}
     .snapshot-title strong, .snapshot-detail strong {{ overflow-wrap: anywhere; }}
     .snapshot-actions {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
+    .choice-grid {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .recommended-choice {{ display: flex; justify-content: center; margin: 12px 0; width: 100%; }}
+    .recommended-choice button {{
+      width: min(520px, 100%);
+      border-color: #06b6d4;
+      background: rgba(6, 182, 212, .16);
+      color: var(--text);
+      font-weight: 700;
+      text-align: center;
+    }}
+    .recommended-badge {{ display: block; color: #06b6d4; font-size: 11px; font-weight: 750; margin-bottom: 2px; text-transform: uppercase; }}
+    .choice-label {{ display: block; overflow-wrap: anywhere; }}
     .repo-history {{ display: grid; gap: 8px; margin-top: 12px; }}
     .log {{ min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; border: 1px solid var(--line); border-radius: 6px; padding: 10px; max-height: 280px; overflow: auto; color: var(--muted); }}
     @media (max-width: 720px) {{ .status-grid {{ grid-template-columns: 1fr; }} header {{ align-items: flex-start; gap: 10px; flex-direction: column; }} }}
@@ -934,10 +946,47 @@ def manager_html(token: str) -> str:
     function cleanQuestionName(name) {{
       const labels = {{
         config_is_local: 'Sign in method',
+        config_type: 'Type of connection',
         config_driveid: 'Choose OneDrive drive',
         config_drive_type: 'Choose OneDrive type'
       }};
       return labels[name] || String(name || 'Question').replace(/^config_/, '').replaceAll('_', ' ');
+    }}
+    function optionLabel(ex) {{
+      const label = (ex.Value || '') + (ex.Help ? ' - ' + ex.Help : '');
+      return label;
+    }}
+    function isRecommendedOption(optionName, ex) {{
+      const name = String(optionName || '').toLowerCase();
+      const value = String(ex.Value || '').toLowerCase();
+      const help = String(ex.Help || '').toLowerCase();
+      const combined = (value + ' ' + help).trim();
+      if (name === 'config_type') return value === 'onedrive';
+      if (name === 'config_driveid') {{
+        return combined.includes('onedrive') && combined.includes('business') && !combined.includes('personalcachelibrary');
+      }}
+      if (name === 'config_drive_type') return combined.includes('business');
+      return false;
+    }}
+    function makeQuestionButton(q, ex, recommended = false) {{
+      const b = document.createElement('button');
+      if (recommended) {{
+        const badge = document.createElement('span');
+        badge.className = 'recommended-badge';
+        badge.textContent = 'Recommended';
+        const label = document.createElement('span');
+        label.className = 'choice-label';
+        label.textContent = optionLabel(ex);
+        b.append(badge, label);
+      }} else {{
+        b.textContent = optionLabel(ex);
+      }}
+      if (recommended) b.className = 'primary';
+      b.onclick = () => runAction(async () => {{
+        const data = await api('/api/rclone/answer', {{method:'POST', body:{{state:q.state, answer:String(ex.Value)}}}});
+        renderQuestion(data.question);
+      }}, b);
+      return b;
     }}
     function renderQuestion(q) {{
       const box = document.getElementById('rcloneQuestion');
@@ -953,15 +1002,17 @@ def manager_html(token: str) -> str:
         : (q.option.Help || '');
       box.append(title, help);
       const examples = q.option.Examples || [];
-      examples.forEach(ex => {{
-        const b = document.createElement('button');
-        b.textContent = (ex.Value || '') + (ex.Help ? ' - ' + ex.Help : '');
-        b.onclick = () => runAction(async () => {{
-          const data = await api('/api/rclone/answer', {{method:'POST', body:{{state:q.state, answer:String(ex.Value)}}}});
-          renderQuestion(data.question);
-        }}, b);
-        box.append(b);
-      }});
+      const recommended = examples.find(ex => isRecommendedOption(q.option.Name, ex));
+      if (recommended) {{
+        const row = document.createElement('div');
+        row.className = 'recommended-choice';
+        row.append(makeQuestionButton(q, recommended, true));
+        box.append(row);
+      }}
+      const grid = document.createElement('div');
+      grid.className = 'choice-grid';
+      examples.filter(ex => ex !== recommended).forEach(ex => grid.append(makeQuestionButton(q, ex, false)));
+      if (grid.children.length) box.append(grid);
       if (!q.option.Exclusive) {{
         const input = document.createElement(q.option.IsPassword ? 'input' : 'input');
         input.type = q.option.IsPassword ? 'password' : 'text';

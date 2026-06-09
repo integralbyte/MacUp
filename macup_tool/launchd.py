@@ -55,3 +55,17 @@ def install(cli: str | None = None, load: bool = True) -> Path:
     if load:
         load_plist()
     return path
+
+
+def uninstall() -> Path:
+    path = paths.launch_agent_path()
+    uid = os.getuid()
+    subprocess.run(
+        ["launchctl", "bootout", f"gui/{uid}", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    path.unlink(missing_ok=True)
+    return path

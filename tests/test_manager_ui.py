@@ -21,6 +21,14 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("Opened the official OneDrive snapshots folder", html)
         self.assertNotIn("window.open('/repository?token='", html)
 
+    def test_advanced_settings_include_confirmed_reset_and_close_on_stop(self):
+        html = manager_html("test-token")
+        self.assertIn("Reset MacUp", html)
+        self.assertIn("RESET MACUP", html)
+        self.assertIn("/api/reset", html)
+        self.assertIn("closeManagerPage('Manager stopped')", html)
+        self.assertIn("closeManagerPage('MacUp reset complete')", html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,3 +45,13 @@ def install(cli: str | None = None) -> Path:
     write_text_atomic(target, plugin_script(cli), mode=0o755)
     os.chmod(target, 0o755)
     return target
+
+
+def uninstall() -> list[Path]:
+    if not paths.xbar_plugin_dir().exists():
+        return []
+    removed: list[Path] = []
+    for plugin in paths.xbar_plugin_dir().glob("macup.*.sh"):
+        plugin.unlink(missing_ok=True)
+        removed.append(plugin)
+    return removed

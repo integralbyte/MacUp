@@ -63,6 +63,17 @@ def store_password(service: str, account: str, password: str) -> None:
     )
 
 
+def delete_password(service: str, account: str) -> bool:
+    result = subprocess.run(
+        [security_bin(), "delete-generic-password", "-a", account, "-s", service],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def ensure_password(service: str, account: str) -> bool:
     if find_password(service, account) is not None:
         return False

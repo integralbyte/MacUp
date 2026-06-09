@@ -17,9 +17,10 @@ from . import keychain, manager_state, paths, rclone_config, snapshots
 from .backup import BackupError, detach_backup, ensure_repository, run_backup, run_id
 from .config import load_config, normalize_sources, repository, rclone_config_path, save_config, validate_config
 from .doctor import checks
-from .installer import install_all, is_xbar_running, open_full_disk_access_settings
+from .installer import install_all, is_xbar_running, open_full_disk_access_settings, refresh_xbar
 from .logutil import RunLogger
 from . import logutil
+from .reset import CONFIRMATION_TEXT, reset_local_state
 from .restore import detach_restore, load_restore_status
 from .status import json_output, load_status, summarize
 from .timeutil import iso
@@ -427,7 +428,14 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 detach_restore(str(paths.cli_path()), snapshot=snapshot_id, parent=parent)
                 self._send_json({"ok": True, "message": "Restore started."})
                 return
+            if parsed.path == "/api/reset":
+                result = reset_local_state(str(body.get("confirmation") or ""))
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                self._send_json({"ok": True, "reset": result})
+                return
             if parsed.path == "/api/shutdown":
+                manager_state.clear(self.server.token)
+                refresh_xbar()
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 self._send_json({"ok": True})
                 return
@@ -544,6 +552,7 @@ def manager_html(token: str) -> str:
     button.danger {{ border-color: var(--bad); color: var(--bad); }}
     .hidden {{ display: none !important; }}
     .warning {{ border: 1px solid var(--warn); color: var(--warn); border-radius: 6px; padding: 10px; margin-top: 12px; }}
+    .danger-zone {{ border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; display: grid; gap: 10px; }}
     .setup-step {{ display: grid; gap: 8px; }}
     .setup-step strong {{ font-size: 15px; }}
     details {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; }}
@@ -684,6 +693,17 @@ def manager_html(token: str) -> str:
           <button id="shutdown">Stop Manager</button>
         </div>
         <div id="repoHistory" class="repo-history"></div>
+        <div class="danger-zone">
+          <button id="resetShow" class="danger">Reset MacUp</button>
+          <div id="resetPanel" class="hidden">
+            <div class="warning">This removes local MacUp settings, Keychain secrets, scheduler, and Xbar plugin. It does not delete backups stored in OneDrive.</div>
+            <label style="margin-top:10px">Type {CONFIRMATION_TEXT}<input id="resetConfirmation" autocomplete="off"></label>
+            <div class="actions" style="margin-top:10px">
+              <button id="resetConfirm" class="danger" disabled>Confirm Reset</button>
+              <button id="resetCancel">Cancel</button>
+            </div>
+          </div>
+        </div>
       </details>
     </section>
   </main>
@@ -695,9 +715,14 @@ def manager_html(token: str) -> str:
     let pollTimer = null;
     let restorePollTimer = null;
     let snapshotsLoaded = false;
+    const resetConfirmationText = {json.dumps(CONFIRMATION_TEXT)};
     const out = document.getElementById('output');
     const liveLog = document.getElementById('liveLog');
     function log(text) {{ out.textContent = String(text); }}
+    function closeManagerPage(message) {{
+      document.body.innerHTML = '<main><section><h2>' + escapeHtml(message) + '</h2><p class="muted">This manager server is closed.</p></section></main>';
+      setTimeout(() => window.close(), 120);
+    }}
     function setBusy(button, busy) {{
       if (!button) return;
       if (busy) {{
@@ -1059,6 +1084,10 @@ def manager_html(token: str) -> str:
       actions.append(start, cancel);
       box.append(message, actions);
     }}
+    function updateResetConfirmState() {{
+      const input = document.getElementById('resetConfirmation');
+      document.getElementById('resetConfirm').disabled = input.value !== resetConfirmationText;
+    }}
     function escapeHtml(value) {{
       return String(value || '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
     }}
@@ -1215,7 +1244,31 @@ def manager_html(token: str) -> str:
       log(data.message);
     }}, event.currentTarget);
     document.getElementById('refreshSnapshots').onclick = event => runAction(async () => {{ snapshotsLoaded = false; await loadSnapshots(); log('Snapshots refreshed.'); }}, event.currentTarget);
-    document.getElementById('shutdown').onclick = event => runAction(async () => {{ await api('/api/shutdown', {{method:'POST', body:{{}}}}); log('Manager stopped.'); }}, event.currentTarget);
+    document.getElementById('shutdown').onclick = event => runAction(async () => {{
+      await api('/api/shutdown', {{method:'POST', body:{{}}}});
+      closeManagerPage('Manager stopped');
+    }}, event.currentTarget);
+    document.getElementById('resetShow').onclick = () => {{
+      document.getElementById('resetPanel').classList.remove('hidden');
+      document.getElementById('resetConfirmation').focus();
+      updateResetConfirmState();
+    }};
+    document.getElementById('resetCancel').onclick = () => {{
+      document.getElementById('resetConfirmation').value = '';
+      document.getElementById('resetPanel').classList.add('hidden');
+      updateResetConfirmState();
+    }};
+    document.getElementById('resetConfirmation').oninput = updateResetConfirmState;
+    document.getElementById('resetConfirmation').onkeydown = event => {{
+      if (event.key === 'Enter' && event.currentTarget.value === resetConfirmationText) {{
+        document.getElementById('resetConfirm').click();
+      }}
+    }};
+    document.getElementById('resetConfirm').onclick = event => runAction(async () => {{
+      const confirmation = document.getElementById('resetConfirmation').value;
+      await api('/api/reset', {{method:'POST', body:{{confirmation}}}});
+      closeManagerPage('MacUp reset complete');
+    }}, event.currentTarget);
     refresh().catch(err => log('Error: ' + err.message));
   </script>
 </body>

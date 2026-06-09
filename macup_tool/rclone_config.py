@@ -5,6 +5,9 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -191,6 +194,130 @@ def repository_remote_path(config: dict[str, Any], subpath: str = "") -> str:
     extra = normalize_repository_subpath(subpath)
     combined = "/".join(part for part in (repo_path, extra) if part)
     return f"{remote}:{combined}" if combined else f"{remote}:"
+
+
+def _repository_path_parts(config: dict[str, Any], subpath: str = "") -> list[str]:
+    repo_path = str(config.get("repository_path") or "").strip().strip("/")
+    extra = normalize_repository_subpath(subpath)
+    return [part for value in (repo_path, extra) for part in value.split("/") if part]
+
+
+def _load_remote_config(config: dict[str, Any]) -> dict[str, Any]:
+    remote = str(config.get("remote_name") or "macup-onedrive").strip()
+    result = subprocess.run(
+        [rclone_bin(), "--config", str(rclone_config_path(config)), "config", "dump"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=rclone_env(config),
+        check=False,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Could not read rclone OneDrive configuration.")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse rclone OneDrive configuration.") from exc
+    section = payload.get(remote)
+    if not isinstance(section, dict):
+        raise RuntimeError(f"rclone remote '{remote}' was not found.")
+    return section
+
+
+def _graph_error(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = json.loads(exc.read().decode("utf-8", errors="replace") or "{}")
+        message = body.get("error", {}).get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    except Exception:
+        pass
+    if exc.code == 401:
+        return "OneDrive sign-in has expired. Reconfigure or test the remote, then try again."
+    if exc.code == 404:
+        return "OneDrive folder was not found. Initialize the repository or run a backup first."
+    return f"Microsoft Graph returned HTTP {exc.code}."
+
+
+def _validate_official_onedrive_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not host or ("sharepoint" not in host and "onedrive" not in host):
+        raise RuntimeError("Microsoft Graph returned an unexpected OneDrive URL.")
+    return url
+
+
+def repository_web_url(config: dict[str, Any], subpath: str = "snapshots") -> str:
+    if str(config.get("repository") or "").strip():
+        raise RuntimeError("Official OneDrive folder links are only available for rclone repository locations.")
+    ensure_encrypted_config(config)
+    remote_path = repository_remote_path(config, subpath)
+    stat = subprocess.run(
+        [
+            rclone_bin(),
+            "--config",
+            str(rclone_config_path(config)),
+            "lsjson",
+            "--stat",
+            "--no-modtime",
+            "--no-mimetype",
+            remote_path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=rclone_env(config),
+        check=False,
+        timeout=30,
+    )
+    if stat.returncode != 0:
+        raise RuntimeError("Could not find the OneDrive snapshots folder. Initialize the repository or run a backup first.")
+    try:
+        item = json.loads(stat.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse OneDrive folder metadata.") from exc
+    if item and item.get("IsDir") is False:
+        raise RuntimeError("The configured OneDrive snapshots path is not a folder.")
+
+    section = _load_remote_config(config)
+    if str(section.get("type") or "").lower() != "onedrive":
+        raise RuntimeError("Official OneDrive folder links require an rclone OneDrive remote.")
+    drive_id = str(section.get("drive_id") or "").strip()
+    if not drive_id:
+        raise RuntimeError("The rclone OneDrive remote is missing its drive id. Reconfigure OneDrive and try again.")
+    try:
+        token = json.loads(str(section.get("token") or "{}"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse the rclone OneDrive token.") from exc
+    access_token = str(token.get("access_token") or "").strip()
+    if not access_token:
+        raise RuntimeError("The rclone OneDrive token is missing. Reconfigure OneDrive and try again.")
+
+    parts = _repository_path_parts(config, subpath)
+    drive = urllib.parse.quote(drive_id, safe="")
+    if parts:
+        encoded_path = "/".join(urllib.parse.quote(part, safe="") for part in parts)
+        graph_url = f"https://graph.microsoft.com/v1.0/drives/{drive}/root:/{encoded_path}?$select=webUrl,name,folder"
+    else:
+        graph_url = f"https://graph.microsoft.com/v1.0/drives/{drive}/root?$select=webUrl,name,folder"
+    request = urllib.request.Request(
+        graph_url,
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(_graph_error(exc)) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not contact Microsoft Graph: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse Microsoft Graph response.") from exc
+    web_url = str(data.get("webUrl") or "").strip()
+    if not web_url:
+        raise RuntimeError("Microsoft Graph did not return a OneDrive web URL.")
+    return _validate_official_onedrive_url(web_url)
 
 
 def list_repository(config: dict[str, Any], subpath: str = "") -> tuple[str, list[dict[str, Any]]]:

@@ -44,6 +44,54 @@ class RcloneConfigTests(unittest.TestCase):
         self.assertEqual(items[0]["name"], "snapshots")
         self.assertNotIn("Metadata", items[1])
 
+    def test_repository_web_url_uses_private_graph_url_not_public_link(self):
+        cfg = default_config()
+        cfg["remote_name"] = "remote"
+        cfg["repository_path"] = "MacUp/host name/restic"
+        stat = Mock(returncode=0, stdout=json.dumps({"IsDir": True}))
+        dump = Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "remote": {
+                        "type": "onedrive",
+                        "drive_id": "drive id",
+                        "token": json.dumps({"access_token": "access-token"}),
+                    }
+                }
+            ),
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({"webUrl": "https://tenant-my.sharepoint.com/personal/me/Documents/MacUp"}).encode()
+
+        with patch("macup_tool.rclone_config.ensure_encrypted_config"), patch(
+            "macup_tool.rclone_config.subprocess.run", side_effect=[stat, dump]
+        ) as run, patch("macup_tool.rclone_config.urllib.request.urlopen", return_value=Response()) as urlopen:
+            url = rclone_config.repository_web_url(cfg, "snapshots")
+
+        self.assertEqual(url, "https://tenant-my.sharepoint.com/personal/me/Documents/MacUp")
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn("lsjson", commands[0])
+        self.assertIn("config", commands[1])
+        self.assertIn("dump", commands[1])
+        self.assertFalse(any("link" in command for command in commands for command in command))
+        request = urlopen.call_args.args[0]
+        self.assertIn("drives/drive%20id/root:/MacUp/host%20name/restic/snapshots", request.full_url)
+
+    def test_repository_web_url_rejects_repository_override(self):
+        cfg = default_config()
+        cfg["repository"] = "/tmp/local-restic"
+        with self.assertRaisesRegex(RuntimeError, "rclone repository locations"):
+            rclone_config.repository_web_url(cfg, "snapshots")
+
 
 if __name__ == "__main__":
     unittest.main()

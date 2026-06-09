@@ -15,6 +15,12 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("combined.includes('business')", html)
         self.assertIn("!combined.includes('personalcachelibrary')", html)
 
+    def test_open_snapshots_button_uses_official_onedrive_url_api(self):
+        html = manager_html("test-token")
+        self.assertIn("/api/repository/web-url?path=snapshots", html)
+        self.assertIn("Opened the official OneDrive snapshots folder", html)
+        self.assertNotIn("window.open('/repository?token='", html)
+
 
 if __name__ == "__main__":
     unittest.main()

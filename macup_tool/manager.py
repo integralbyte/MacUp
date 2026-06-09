@@ -319,6 +319,14 @@ class ManagerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 400)
             return
+        if parsed.path == "/api/repository/web-url":
+            query = urllib.parse.parse_qs(parsed.query)
+            subpath = str((query.get("path") or ["snapshots"])[0])
+            try:
+                self._send_json({"ok": True, "url": rclone_config.repository_web_url(load_config(), subpath)})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
         self._send_json({"ok": False, "error": "Not found"}, 404)
 
     def do_POST(self) -> None:
@@ -1167,8 +1175,23 @@ def manager_html(token: str) -> str:
     }}, event.currentTarget);
     document.getElementById('rcloneStart').onclick = event => showRcloneStartPrompt(event.currentTarget);
     document.getElementById('rcloneTest').onclick = event => runAction(async () => log((await api('/api/rclone/test', {{method:'POST', body:{{}}}})).output || 'Remote test OK.'), event.currentTarget);
-    document.getElementById('openRepository').onclick = () => {{
-      window.open('/repository?token=' + encodeURIComponent(token) + '&path=snapshots', '_blank', 'noopener');
+    document.getElementById('openRepository').onclick = event => {{
+      const opened = window.open('about:blank', '_blank');
+      if (opened) opened.opener = null;
+      runAction(async () => {{
+        try {{
+          const data = await api('/api/repository/web-url?path=snapshots');
+          if (opened) {{
+            opened.location = data.url;
+          }} else {{
+            window.open(data.url, '_blank', 'noopener');
+          }}
+          log('Opened the official OneDrive snapshots folder in a new tab.');
+        }} catch (err) {{
+          if (opened) opened.close();
+          throw err;
+        }}
+      }}, event.currentTarget);
     }};
     document.getElementById('repoInit').onclick = event => runAction(async () => {{ await api('/api/repo/init', {{method:'POST', body:{{}}}}); await refresh(); log('Repository initialized.'); }}, event.currentTarget);
     document.getElementById('installAll').onclick = event => runAction(async () => {{

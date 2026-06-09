@@ -173,3 +173,57 @@ def test_remote(config: dict[str, Any]) -> tuple[bool, str]:
         check=False,
     )
     return result.returncode == 0, result.stdout.strip()
+
+
+def normalize_repository_subpath(subpath: str) -> str:
+    text = str(subpath or "").strip().replace("\\", "/").strip("/")
+    if "\x00" in text:
+        raise ValueError("Repository path contains an invalid character.")
+    parts = [part for part in text.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        raise ValueError("Repository path cannot contain . or .. segments.")
+    return "/".join(parts)
+
+
+def repository_remote_path(config: dict[str, Any], subpath: str = "") -> str:
+    remote = str(config.get("remote_name") or "macup-onedrive").strip()
+    repo_path = str(config.get("repository_path") or "").strip().strip("/")
+    extra = normalize_repository_subpath(subpath)
+    combined = "/".join(part for part in (repo_path, extra) if part)
+    return f"{remote}:{combined}" if combined else f"{remote}:"
+
+
+def list_repository(config: dict[str, Any], subpath: str = "") -> tuple[str, list[dict[str, Any]]]:
+    ensure_encrypted_config(config)
+    remote_path = repository_remote_path(config, subpath)
+    result = subprocess.run(
+        [rclone_bin(), "--config", str(rclone_config_path(config)), "lsjson", remote_path],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=rclone_env(config),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout.strip() or "Could not list OneDrive repository folder.")
+    try:
+        raw = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse rclone folder listing.") from exc
+    if not isinstance(raw, list):
+        raise RuntimeError("Unexpected rclone folder listing.")
+    items: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "name": str(item.get("Name") or item.get("Path") or ""),
+                "path": str(item.get("Path") or item.get("Name") or ""),
+                "is_dir": bool(item.get("IsDir")),
+                "size": int(item.get("Size") or 0),
+                "mod_time": str(item.get("ModTime") or ""),
+            }
+        )
+    items.sort(key=lambda item: (not item["is_dir"], item["name"].lower()))
+    return remote_path, items

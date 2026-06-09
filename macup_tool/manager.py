@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 import subprocess
+import tempfile
 import threading
 import urllib.parse
 import webbrowser
@@ -13,7 +15,7 @@ from typing import Any
 
 from . import keychain, manager_state, paths, rclone_config, snapshots
 from .backup import BackupError, detach_backup, ensure_repository, run_backup, run_id
-from .config import load_config, normalize_sources, repository, save_config, validate_config
+from .config import load_config, normalize_sources, repository, rclone_config_path, save_config, validate_config
 from .doctor import checks
 from .installer import install_all, is_xbar_running, open_full_disk_access_settings
 from .logutil import RunLogger
@@ -115,6 +117,61 @@ def _record_repository_change(old_config: dict[str, Any], new_config: dict[str, 
     ]
 
 
+def _cleanup_rclone_stage(server: "ManagerServer") -> None:
+    if server.rclone_stage_path:
+        Path(server.rclone_stage_path).unlink(missing_ok=True)
+    server.rclone_stage_path = ""
+    server.rclone_state = ""
+
+
+def _begin_rclone_stage(server: "ManagerServer", config: dict[str, Any]) -> dict[str, Any]:
+    _cleanup_rclone_stage(server)
+    paths.ensure_base_dirs()
+    fd, temp_name = tempfile.mkstemp(prefix="rclone-stage-", suffix=".conf", dir=str(paths.state_dir()))
+    os.close(fd)
+    stage = Path(temp_name)
+    stage.unlink(missing_ok=True)
+    real = rclone_config_path(config)
+    if real.exists():
+        shutil.copy2(real, stage)
+    else:
+        stage.touch(mode=0o600)
+    os.chmod(stage, 0o600)
+    server.rclone_stage_path = str(stage)
+    staged = dict(config)
+    staged["rclone_config_path"] = str(stage)
+    return staged
+
+
+def _active_rclone_stage(server: "ManagerServer", config: dict[str, Any]) -> dict[str, Any]:
+    if not server.rclone_stage_path or not Path(server.rclone_stage_path).exists():
+        raise RuntimeError("OneDrive setup was not started. Click Configure OneDrive again.")
+    staged = dict(config)
+    staged["rclone_config_path"] = server.rclone_stage_path
+    return staged
+
+
+def _commit_rclone_stage(server: "ManagerServer", config: dict[str, Any]) -> dict[str, Any]:
+    if not server.rclone_stage_path:
+        raise RuntimeError("OneDrive setup was not started.")
+    stage = Path(server.rclone_stage_path)
+    if not stage.exists():
+        raise RuntimeError("Staged OneDrive configuration is missing.")
+    real = rclone_config_path(config)
+    real.parent.mkdir(parents=True, exist_ok=True)
+    tmp = real.with_name(f".{real.name}.stage")
+    shutil.copy2(stage, tmp)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, real)
+    stage.unlink(missing_ok=True)
+    server.rclone_stage_path = ""
+    server.rclone_state = ""
+    saved = dict(config)
+    saved["rclone_configured"] = True
+    saved["rclone_config_path"] = str(real)
+    return save_config(saved)
+
+
 class ManagerHandler(BaseHTTPRequestHandler):
     server: "ManagerServer"
 
@@ -140,6 +197,14 @@ class ManagerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_repository_html(self, initial_path: str) -> None:
+        body = repository_browser_html(self.server.token, initial_path).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _authorized(self) -> bool:
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
@@ -159,6 +224,17 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "Unauthorized"}, 403)
                 return
             self._send_html()
+            return
+        if parsed.path == "/repository":
+            if not self._authorized():
+                self._send_json({"ok": False, "error": "Unauthorized"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            initial_path = str((query.get("path") or [""])[0])
+            try:
+                self._send_repository_html(initial_path)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
             return
         if parsed.path.startswith("/api/") and not self._authorized():
             self._send_json({"ok": False, "error": "Unauthorized"}, 403)
@@ -234,6 +310,15 @@ class ManagerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 400)
             return
+        if parsed.path == "/api/repository/list":
+            query = urllib.parse.parse_qs(parsed.query)
+            subpath = str((query.get("path") or [""])[0])
+            try:
+                remote_path, items = rclone_config.list_repository(load_config(), subpath)
+                self._send_json({"ok": True, "remote_path": remote_path, "path": subpath, "items": items})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
         self._send_json({"ok": False, "error": "Not found"}, 404)
 
     def do_POST(self) -> None:
@@ -272,23 +357,23 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "folder": pick_restore_destination()})
                 return
             if parsed.path == "/api/rclone/start":
-                question = rclone_config.start_onedrive_flow(load_config())
+                cfg = load_config()
+                staged = _begin_rclone_stage(self.server, cfg)
+                question = rclone_config.start_onedrive_flow(staged)
                 self.server.rclone_state = question.state
                 if question.complete:
-                    cfg = load_config()
-                    cfg["rclone_configured"] = True
-                    save_config(cfg)
+                    _commit_rclone_stage(self.server, cfg)
                 self._send_json({"ok": not bool(question.error), "question": _question_payload(question)})
                 return
             if parsed.path == "/api/rclone/answer":
                 answer = str(body.get("answer") or "")
                 state = str(body.get("state") or self.server.rclone_state or "")
-                question = rclone_config.continue_flow(load_config(), state, answer)
+                cfg = load_config()
+                staged = _active_rclone_stage(self.server, cfg)
+                question = rclone_config.continue_flow(staged, state, answer)
                 self.server.rclone_state = question.state
                 if question.complete:
-                    cfg = load_config()
-                    cfg["rclone_configured"] = True
-                    save_config(cfg)
+                    _commit_rclone_stage(self.server, cfg)
                 self._send_json({"ok": not bool(question.error), "question": _question_payload(question)})
                 return
             if parsed.path == "/api/rclone/test":
@@ -349,6 +434,7 @@ class ManagerServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.token = token
         self.rclone_state = ""
+        self.rclone_stage_path = ""
 
 
 def run_manager(port: int = 0, open_browser: bool = True) -> int:
@@ -375,6 +461,7 @@ def run_manager(port: int = 0, open_browser: bool = True) -> int:
         pass
     finally:
         server.server_close()
+        _cleanup_rclone_stage(server)
         manager_state.clear(token)
     return 0
 
@@ -541,6 +628,7 @@ def manager_html(token: str) -> str:
       <div class="actions">
         <button id="rcloneStart">Configure OneDrive</button>
         <button id="rcloneTest">Test Remote</button>
+        <button id="openRepository">Open Snapshots Folder</button>
       </div>
       <div id="rcloneQuestion" style="margin-top:12px"></div>
     </section>
@@ -887,6 +975,31 @@ def manager_html(token: str) -> str:
         box.append(input, b);
       }}
     }}
+    function showRcloneStartPrompt(button) {{
+      const box = document.getElementById('rcloneQuestion');
+      box.innerHTML = '';
+      const message = document.createElement('div');
+      message.className = 'warning';
+      message.textContent = 'This starts a new OneDrive setup in a temporary config. Your current OneDrive connection is not replaced unless setup completes.';
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      actions.style.marginTop = '10px';
+      const start = document.createElement('button');
+      start.className = 'primary';
+      start.textContent = 'Start Setup';
+      const cancel = document.createElement('button');
+      cancel.textContent = 'Cancel';
+      start.onclick = () => runAction(async () => {{
+        const data = await api('/api/rclone/start', {{method:'POST', body:{{}}}});
+        renderQuestion(data.question);
+      }}, start);
+      cancel.onclick = () => {{
+        box.innerHTML = '';
+        log('OneDrive setup was not changed.');
+      }};
+      actions.append(start, cancel);
+      box.append(message, actions);
+    }}
     function escapeHtml(value) {{
       return String(value || '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
     }}
@@ -1001,8 +1114,11 @@ def manager_html(token: str) -> str:
       await refresh();
       log('Password stored in Keychain.');
     }}, event.currentTarget);
-    document.getElementById('rcloneStart').onclick = event => runAction(async () => renderQuestion((await api('/api/rclone/start', {{method:'POST', body:{{}}}})).question), event.currentTarget);
+    document.getElementById('rcloneStart').onclick = event => showRcloneStartPrompt(event.currentTarget);
     document.getElementById('rcloneTest').onclick = event => runAction(async () => log((await api('/api/rclone/test', {{method:'POST', body:{{}}}})).output || 'Remote test OK.'), event.currentTarget);
+    document.getElementById('openRepository').onclick = () => {{
+      window.open('/repository?token=' + encodeURIComponent(token) + '&path=snapshots', '_blank', 'noopener');
+    }};
     document.getElementById('repoInit').onclick = event => runAction(async () => {{ await api('/api/repo/init', {{method:'POST', body:{{}}}}); await refresh(); log('Repository initialized.'); }}, event.currentTarget);
     document.getElementById('installAll').onclick = event => runAction(async () => {{
       const data = await api('/api/install', {{method:'POST', body:{{load:true}}}});
@@ -1027,6 +1143,139 @@ def manager_html(token: str) -> str:
     document.getElementById('refreshSnapshots').onclick = event => runAction(async () => {{ snapshotsLoaded = false; await loadSnapshots(); log('Snapshots refreshed.'); }}, event.currentTarget);
     document.getElementById('shutdown').onclick = event => runAction(async () => {{ await api('/api/shutdown', {{method:'POST', body:{{}}}}); log('Manager stopped.'); }}, event.currentTarget);
     refresh().catch(err => log('Error: ' + err.message));
+  </script>
+</body>
+</html>
+"""
+
+
+def repository_browser_html(token: str, initial_path: str) -> str:
+    safe_initial = rclone_config.normalize_repository_subpath(initial_path)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MacUp Repository</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #20242a;
+      --muted: #667085;
+      --line: #d8dee8;
+      --accent: #2563eb;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{ --bg: #111418; --panel: #191d23; --text: #f2f4f7; --muted: #a3acba; --line: #303742; }}
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }}
+    header {{ padding: 18px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }}
+    h1 {{ margin: 0; font-size: 20px; }}
+    main {{ width: min(760px, 100%); margin: 0 auto; padding: 16px; display: grid; gap: 14px; }}
+    section {{ background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-width: 0; }}
+    button {{ border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 7px 10px; border-radius: 6px; font: inherit; cursor: pointer; }}
+    button.primary {{ background: var(--accent); border-color: var(--accent); color: white; }}
+    .muted {{ color: var(--muted); }}
+    .actions {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+    .path {{ overflow-wrap: anywhere; color: var(--muted); }}
+    .list {{ display: grid; gap: 6px; }}
+    .row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 6px; padding: 9px; }}
+    .name {{ overflow-wrap: anywhere; }}
+    .meta {{ color: var(--muted); white-space: nowrap; }}
+    .log {{ white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--line); border-radius: 6px; padding: 10px; color: var(--muted); }}
+  </style>
+</head>
+<body>
+  <header><h1>MacUp Repository</h1></header>
+  <main>
+    <section>
+      <div class="path" id="remotePath">Loading...</div>
+      <div class="actions" style="margin-top:12px">
+        <button id="up">Up</button>
+        <button id="root">Repository Root</button>
+        <button id="snapshots" class="primary">Snapshots Folder</button>
+      </div>
+    </section>
+    <section>
+      <div id="items" class="list muted">Loading folder...</div>
+    </section>
+  </main>
+  <script>
+    const token = {json.dumps(token)};
+    let currentPath = {json.dumps(safe_initial)};
+    function fmtBytes(value) {{
+      const size = Number(value || 0);
+      if (size < 0) return '';
+      const units = ['B','KiB','MiB','GiB','TiB'];
+      let amount = size;
+      let unit = 0;
+      while (amount >= 1024 && unit < units.length - 1) {{ amount /= 1024; unit++; }}
+      return unit === 0 ? Math.round(amount) + ' ' + units[unit] : amount.toFixed(1) + ' ' + units[unit];
+    }}
+    function joinPath(base, name) {{
+      return [base, name].filter(Boolean).join('/').replace(/^\\/+/, '');
+    }}
+    function parentPath(path) {{
+      const parts = String(path || '').split('/').filter(Boolean);
+      parts.pop();
+      return parts.join('/');
+    }}
+    async function api(path) {{
+      const res = await fetch(path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token), {{
+        headers: {{ 'X-MacUp-Token': token }}
+      }});
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }}
+    async function load(path) {{
+      currentPath = String(path || '').replace(/^\\/+|\\/+$/g, '');
+      const box = document.getElementById('items');
+      box.className = 'list muted';
+      box.textContent = 'Loading folder...';
+      try {{
+        const data = await api('/api/repository/list?path=' + encodeURIComponent(currentPath));
+        document.getElementById('remotePath').textContent = data.remote_path || '';
+        box.innerHTML = '';
+        box.className = 'list';
+        const items = data.items || [];
+        if (!items.length) {{
+          box.className = 'list muted';
+          box.textContent = 'Folder is empty.';
+          return;
+        }}
+        items.forEach(item => {{
+          const row = document.createElement('div');
+          row.className = 'row';
+          const name = document.createElement('div');
+          name.className = 'name';
+          const label = (item.is_dir ? 'Folder: ' : 'File: ') + (item.name || item.path || '');
+          if (item.is_dir) {{
+            const button = document.createElement('button');
+            button.textContent = label;
+            button.onclick = () => load(joinPath(currentPath, item.path || item.name));
+            name.append(button);
+          }} else {{
+            name.textContent = label;
+          }}
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          meta.textContent = item.is_dir ? '' : fmtBytes(item.size);
+          row.append(name, meta);
+          box.append(row);
+        }});
+      }} catch (err) {{
+        box.className = 'log';
+        box.textContent = 'Could not open repository folder: ' + (err && err.message ? err.message : String(err));
+      }}
+    }}
+    document.getElementById('up').onclick = () => load(parentPath(currentPath));
+    document.getElementById('root').onclick = () => load('');
+    document.getElementById('snapshots').onclick = () => load('snapshots');
+    load(currentPath);
   </script>
 </body>
 </html>

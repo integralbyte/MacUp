@@ -11,6 +11,26 @@ The manager is not meant to run all day.
 
 ## Quick Start
 
+### Double-click setup
+
+From a GitHub download or clone, double-click:
+
+```text
+Install MacUp.command
+```
+
+It checks/install prerequisites, opens the MacUp manager, and installs the scheduler/Xbar integration after onboarding is complete. You still need to choose the Restic password, sign in to OneDrive, and choose backup folders in the browser because those choices cannot be safely automated.
+
+The MacUp Xbar plugin is included in this repo and is generated/installed by MacUp. The Xbar app itself is a separate app; the double-click installer detects it or installs it with Homebrew when possible.
+
+If macOS refuses to run the command file from a ZIP download, run this once in Terminal:
+
+```sh
+chmod +x "Install MacUp.command"
+```
+
+### Terminal setup
+
 ```sh
 cd MacUp
 ./macup doctor
@@ -25,6 +45,8 @@ In the manager:
 4. Initialize the repository.
 5. Install the scheduler and Xbar plugin.
 6. Run a manual backup.
+
+After a reset, run `./macup manager` or double-click `Install MacUp.command` again. MacUp will start from the onboarding flow because local settings and Keychain secrets have been removed.
 
 ## Defaults
 
@@ -54,7 +76,7 @@ In the manager:
 - Status: `~/.local/state/macup/status.json`
 - Logs: `~/.local/state/macup/logs/`
 - LaunchAgent: `~/Library/LaunchAgents/com.macup.backup.plist`
-- Xbar plugin: `~/Library/Application Support/xbar/plugins/macup.1m.sh`
+- Xbar plugin: `~/Library/Application Support/xbar/plugins/macup.5s.sh`
 
 Restic and rclone secrets are stored in macOS Keychain.
 

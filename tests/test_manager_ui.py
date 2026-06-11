@@ -55,6 +55,16 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("Choose Different Repository", html)
         self.assertIn("!setup.repository_selected", html)
 
+    def test_onboarding_has_always_available_reset_control(self):
+        html = manager_html("test-token")
+        self.assertIn('id="setupResetSection"', html)
+        self.assertIn("Reset Setup", html)
+        self.assertIn("setupResetConfirmation", html)
+        self.assertIn("setupResetConfirm", html)
+        self.assertIn("updateSetupResetConfirmState", html)
+        self.assertIn("id === 'setupResetSection'", html)
+        self.assertIn("/api/reset", html)
+
 
 if __name__ == "__main__":
     unittest.main()

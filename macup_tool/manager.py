@@ -766,6 +766,20 @@ def manager_html(token: str) -> str:
       <div id="output" class="log">Ready.</div>
     </section>
 
+    <section id="setupResetSection" class="hidden">
+      <h2>Reset Setup</h2>
+      <p class="muted">Reset MacUp back to the first setup step. This removes local MacUp settings, Keychain secrets, scheduler, and Xbar plugin. It does not delete backups stored in OneDrive.</p>
+      <button id="setupResetShow" class="danger">Reset MacUp</button>
+      <div id="setupResetPanel" class="hidden" style="margin-top:12px">
+        <div class="warning">Type the confirmation text exactly to reset local MacUp setup.</div>
+        <label style="margin-top:10px">Type {CONFIRMATION_TEXT}<input id="setupResetConfirmation" autocomplete="off"></label>
+        <div class="actions" style="margin-top:10px">
+          <button id="setupResetConfirm" class="danger" disabled>Confirm Reset</button>
+          <button id="setupResetCancel">Cancel</button>
+        </div>
+      </div>
+    </section>
+
     <section id="latestLogSection" data-normal>
       <h2>Latest Backup Log</h2>
       <div id="liveLog" class="log">No log yet.</div>
@@ -936,7 +950,7 @@ def manager_html(token: str) -> str:
     function renderSetup(data) {{
       const complete = Boolean(data.setup && data.setup.complete);
       const normalSections = [...document.querySelectorAll('[data-normal]')].map(section => section.id);
-      const setupOnlySections = ['repositorySetupSection', 'schedulerSetupSection'];
+      const setupOnlySections = ['repositorySetupSection', 'schedulerSetupSection', 'setupResetSection'];
       setVisible('setupFlow', !complete);
       if (complete) {{
         normalSections.forEach(id => setVisible(id, true));
@@ -949,7 +963,7 @@ def manager_html(token: str) -> str:
       document.getElementById('setupText').textContent = step.text;
       setVisible('setupModeChoice', Boolean(step.modeChoice));
       normalSections.forEach(id => setVisible(id, step.sections.includes(id)));
-      setupOnlySections.forEach(id => setVisible(id, step.sections.includes(id)));
+      setupOnlySections.forEach(id => setVisible(id, id === 'setupResetSection' || step.sections.includes(id)));
       setVisible('outputSection', true);
       document.getElementById('advancedDetails').open = step.sections.includes('advancedSection');
     }}
@@ -1330,6 +1344,10 @@ def manager_html(token: str) -> str:
       const input = document.getElementById('resetConfirmation');
       document.getElementById('resetConfirm').disabled = input.value !== resetConfirmationText;
     }}
+    function updateSetupResetConfirmState() {{
+      const input = document.getElementById('setupResetConfirmation');
+      document.getElementById('setupResetConfirm').disabled = input.value !== resetConfirmationText;
+    }}
     function escapeHtml(value) {{
       return String(value || '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
     }}
@@ -1530,6 +1548,27 @@ def manager_html(token: str) -> str:
     }};
     document.getElementById('resetConfirm').onclick = event => runAction(async () => {{
       const confirmation = document.getElementById('resetConfirmation').value;
+      await api('/api/reset', {{method:'POST', body:{{confirmation}}}});
+      closeManagerPage('MacUp reset complete');
+    }}, event.currentTarget);
+    document.getElementById('setupResetShow').onclick = () => {{
+      document.getElementById('setupResetPanel').classList.remove('hidden');
+      document.getElementById('setupResetConfirmation').focus();
+      updateSetupResetConfirmState();
+    }};
+    document.getElementById('setupResetCancel').onclick = () => {{
+      document.getElementById('setupResetConfirmation').value = '';
+      document.getElementById('setupResetPanel').classList.add('hidden');
+      updateSetupResetConfirmState();
+    }};
+    document.getElementById('setupResetConfirmation').oninput = updateSetupResetConfirmState;
+    document.getElementById('setupResetConfirmation').onkeydown = event => {{
+      if (event.key === 'Enter' && event.currentTarget.value === resetConfirmationText) {{
+        document.getElementById('setupResetConfirm').click();
+      }}
+    }};
+    document.getElementById('setupResetConfirm').onclick = event => runAction(async () => {{
+      const confirmation = document.getElementById('setupResetConfirmation').value;
       await api('/api/reset', {{method:'POST', body:{{confirmation}}}});
       closeManagerPage('MacUp reset complete');
     }}, event.currentTarget);

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from macup_tool import launchd, xbar
+from macup_tool import installer, launchd, xbar
 
 
 class InstallArtifactTests(unittest.TestCase):
@@ -37,6 +37,39 @@ class InstallArtifactTests(unittest.TestCase):
                 target = xbar.install("/tmp/macup")
                 self.assertTrue(target.exists())
                 self.assertFalse(old.exists())
+
+    def test_installer_copies_bundled_xbar_to_user_applications_and_clears_quarantine(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "xbar (use what you need)" / "xbar.app"
+            (source / "Contents").mkdir(parents=True)
+            (source / "Contents" / "Info.plist").write_text("xbar", encoding="utf-8")
+            target = root / "home" / "Applications" / "xbar.app"
+            with patch("macup_tool.installer.paths.repo_root", return_value=root / "repo"), patch(
+                "macup_tool.installer.system_xbar_app",
+                return_value=root / "Applications" / "xbar.app",
+            ), patch(
+                "macup_tool.installer.user_xbar_app",
+                return_value=target,
+            ), patch(
+                "macup_tool.installer.remove_quarantine"
+            ) as remove_quarantine:
+                installed = installer.ensure_xbar_app_installed()
+
+            self.assertEqual(installed, target)
+            self.assertTrue((target / "Contents" / "Info.plist").exists())
+            remove_quarantine.assert_called()
+
+    def test_installer_verifies_xbar_plugin_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / "macup.5s.sh"
+            plugin.write_text("#!/bin/sh\necho '● | color=#2da44e'\n", encoding="utf-8")
+            plugin.chmod(0o755)
+
+            ok, first_line = installer.verify_xbar_plugin_output(plugin)
+
+            self.assertTrue(ok)
+            self.assertEqual(first_line, "● | color=#2da44e")
 
 
 if __name__ == "__main__":

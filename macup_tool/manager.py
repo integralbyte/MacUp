@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import keychain, manager_state, paths, rclone_config, snapshots
-from .backup import BackupError, detach_backup, ensure_repository, run_backup, run_id
+from .backup import BackupError, detach_backup, ensure_repository, run_backup, run_id, stop_backup
 from .config import fresh_repository_path, load_config, normalize_sources, repository, rclone_config_path, save_config, validate_config
 from .doctor import checks
 from .installer import install_all, is_xbar_running, open_full_disk_access_settings, refresh_xbar
@@ -470,6 +470,9 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 detach_backup(str(paths.cli_path()))
                 self._send_json({"ok": True})
                 return
+            if parsed.path == "/api/backup-stop":
+                self._send_json({"ok": True, **stop_backup()})
+                return
             if parsed.path == "/api/snapshot/restore":
                 snapshot_id = str(body.get("snapshot") or "")
                 parent = str(body.get("parent") or "")
@@ -621,6 +624,7 @@ def manager_html(token: str) -> str:
     .metric {{ min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-height: 64px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 12px; }}
     .metric strong {{ display: block; margin-top: 4px; font-size: 14px; overflow-wrap: anywhere; }}
+    progress {{ width: 100%; height: 14px; accent-color: var(--accent); }}
     .sources {{ display: grid; gap: 8px; margin-bottom: 12px; }}
     .source {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }}
     .muted {{ color: var(--muted); }}
@@ -691,6 +695,17 @@ def manager_html(token: str) -> str:
         <div class="metric"><span>Last backup</span><strong id="metricLast">Never</strong></div>
         <div class="metric"><span>Next backup</span><strong id="metricNext">Unknown</strong></div>
         <div class="metric"><span>Latest log</span><strong id="metricLog">None</strong></div>
+      </div>
+    </section>
+
+    <section id="activitySection" data-normal>
+      <h2>Backup Activity</h2>
+      <div class="grid">
+        <div class="metric"><span>Progress</span><strong id="backupProgressText">Idle</strong></div>
+        <progress id="backupProgress" max="100" value="0"></progress>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button id="stopBackup" class="danger">Stop Backup</button>
       </div>
     </section>
 
@@ -1119,6 +1134,36 @@ def manager_html(token: str) -> str:
         if (button.dataset.busy !== 'true') button.disabled = restoreRunning;
       }});
     }}
+    function formatBytes(value) {{
+      const size = Number(value || 0);
+      const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let amount = size;
+      let unit = 0;
+      while (amount >= 1024 && unit < units.length - 1) {{
+        amount = amount / 1024;
+        unit += 1;
+      }}
+      return unit === 0 ? String(Math.round(amount)) + ' ' + units[unit] : amount.toFixed(1) + ' ' + units[unit];
+    }}
+    function renderActivity(data) {{
+      const summary = data.summary || {{}};
+      const running = Boolean(summary.running);
+      setVisible('activitySection', running);
+      if (!running) return;
+      const percentRaw = summary.progress_percent;
+      const percent = percentRaw === null || percentRaw === undefined ? 0 : Number(percentRaw);
+      const textPercent = Number.isFinite(percent) ? percent.toFixed(percent >= 10 || percent === Math.round(percent) ? 0 : 1) + '%' : 'working';
+      const current = Number(summary.progress_current || 0);
+      const total = Number(summary.progress_total || 0);
+      const bytesDone = Number(summary.progress_bytes_done || 0);
+      const totalBytes = Number(summary.progress_total_bytes || 0);
+      const parts = [textPercent];
+      if (totalBytes) parts.push(formatBytes(bytesDone) + ' of ' + formatBytes(totalBytes));
+      if (total > 1 && current) parts.push('part ' + current + ' of ' + total);
+      if (summary.progress_message) parts.push(summary.progress_message);
+      document.getElementById('backupProgressText').textContent = parts.join(' - ');
+      document.getElementById('backupProgress').value = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+    }}
     function render(data) {{
       cfg = data.config;
       lastStatus = data.summary;
@@ -1147,6 +1192,7 @@ def manager_html(token: str) -> str:
       renderRepositorySetup(data);
       renderRestoreStatus(data.restore);
       renderSetup(data);
+      renderActivity(data);
       syncSnapshotDownloadButtons();
       if (data.setup && !data.setup.complete && cfg.repository_mode === 'existing' && data.setup.onedrive && !data.setup.repository_selected && !repositoriesLoaded) {{
         loadRepositoryCandidates().catch(err => log('Repository discovery failed: ' + err.message));
@@ -1520,6 +1566,11 @@ def manager_html(token: str) -> str:
       log('Backup started. Watching live status and log.');
       startPolling();
       await refresh();
+    }}, event.currentTarget);
+    document.getElementById('stopBackup').onclick = event => runAction(async () => {{
+      const data = await api('/api/backup-stop', {{method:'POST', body:{{}}}});
+      await refresh();
+      log(data.message || 'Backup stopped.');
     }}, event.currentTarget);
     document.getElementById('fullDiskAccess').onclick = event => runAction(async () => {{
       const data = await api('/api/full-disk-access', {{method:'POST', body:{{}}}});

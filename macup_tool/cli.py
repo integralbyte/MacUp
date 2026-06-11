@@ -6,7 +6,7 @@ import json
 import sys
 
 from . import __version__, keychain, paths
-from .backup import BackupError, detach_backup, run_backup
+from .backup import BackupError, detach_backup, run_backup, stop_backup
 from .config import load_config, save_config
 from .doctor import text_report
 from .installer import install_all
@@ -24,6 +24,10 @@ def _cmd_manager(args) -> int:
 
 
 def _cmd_backup(args) -> int:
+    if args.stop:
+        result = stop_backup()
+        print(result["message"])
+        return 0 if result["stopped"] else 1
     if args.detach:
         return detach_backup(str(paths.cli_path()))
     try:
@@ -117,6 +121,7 @@ def build_parser() -> argparse.ArgumentParser:
     backup.add_argument("--due", action="store_true", help="run only when the schedule is due")
     backup.add_argument("--manual", action="store_true", help="mark this as a manual run")
     backup.add_argument("--detach", action="store_true", help="start backup in the background")
+    backup.add_argument("--stop", action="store_true", help="stop the running backup")
     backup.set_defaults(func=_cmd_backup)
 
     status = sub.add_parser("status", help="show backup status")

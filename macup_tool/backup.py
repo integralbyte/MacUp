@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ from .config import MACUP_TAG, RUN_TAG_PREFIX, repository, rclone_config_path, u
 from .logutil import RunLogger, prune_logs
 from .process import CommandError, CommandResult, run_streamed
 from .rclone_config import rclone_bin
-from .status import is_due, load_status, mark_backup_progress, mark_failed, mark_running, mark_success
+from .status import is_due, load_status, mark_backup_progress, mark_failed, mark_running, mark_stopped, mark_success
 from .timeutil import iso
 
 
@@ -45,6 +46,85 @@ def process_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _descendant_pids(root_pid: int) -> list[int]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,ppid="],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    children: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    found: list[int] = []
+    stack = list(children.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        found.append(pid)
+        stack.extend(children.get(pid, []))
+    return found
+
+
+def _signal_pid(pid: int, sig: int) -> None:
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        pass
+
+
+def _signal_process_tree(pid: int, sig: int) -> None:
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        pass
+    except OSError:
+        pass
+    for child in reversed(_descendant_pids(pid)):
+        _signal_pid(child, sig)
+    _signal_pid(pid, sig)
+
+
+def stop_backup(timeout: float = 5.0) -> dict[str, Any]:
+    lock_path = paths.lock_path()
+    if not lock_path.exists():
+        status = load_status()
+        if status.get("state") == "running" or status.get("active_run_id"):
+            mark_stopped(str(status.get("active_run_id") or ""), message="Backup status was stale and has been cleared.")
+            return {"stopped": True, "message": "Cleared stale running backup status."}
+        return {"stopped": False, "message": "No backup is running."}
+    try:
+        lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(lock_data.get("pid", 0) or 0)
+        run_id_value = str(lock_data.get("run_id") or "")
+    except Exception:
+        pid = 0
+        run_id_value = ""
+    if pid and process_alive(pid):
+        _signal_process_tree(pid, signal.SIGTERM)
+        deadline = datetime.now(timezone.utc).timestamp() + timeout
+        while process_alive(pid) and datetime.now(timezone.utc).timestamp() < deadline:
+            time.sleep(0.2)
+        if process_alive(pid):
+            _signal_process_tree(pid, signal.SIGKILL)
+    lock_path.unlink(missing_ok=True)
+    status = load_status()
+    latest_log = Path(str(status.get("latest_log") or "")) if status.get("latest_log") else None
+    mark_stopped(run_id_value, latest_log, "Backup was stopped by user.")
+    return {"stopped": True, "message": "Backup stopped."}
 
 
 class BackupLock:

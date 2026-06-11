@@ -65,6 +65,14 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("id === 'setupResetSection'", html)
         self.assertIn("/api/reset", html)
 
+    def test_manager_has_backup_progress_and_stop_button(self):
+        html = manager_html("test-token")
+        self.assertIn('id="activitySection"', html)
+        self.assertIn('id="backupProgress"', html)
+        self.assertIn('id="stopBackup"', html)
+        self.assertIn("/api/backup-stop", html)
+        self.assertIn("renderActivity", html)
+
 
 if __name__ == "__main__":
     unittest.main()

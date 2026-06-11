@@ -11,6 +11,10 @@ from .process import run_streamed
 from .timeutil import relative_display
 
 
+class SnapshotError(RuntimeError):
+    pass
+
+
 def format_bytes(value: Any) -> str:
     try:
         size = float(value)
@@ -52,13 +56,35 @@ def _public_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_restic_json(output: str, fallback: Any) -> Any:
+    text = (output or "").strip()
+    if not text:
+        return fallback
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as original:
+        for line in reversed(text.splitlines()):
+            candidate = line.strip()
+            if not candidate or candidate[0] not in "[{":
+                continue
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        excerpt = text[-1000:].replace("\n", " ")
+        raise SnapshotError(f"Restic returned snapshot metadata that was not JSON: {excerpt}") from original
+
+
 def list_snapshots(config: dict[str, Any]) -> list[dict[str, Any]]:
     result = run_streamed(
         restic_base_args(config) + ["snapshots", "--json", "--tag", MACUP_TAG],
         env=restic_env(config),
-        check=True,
+        check=False,
     )
-    raw = json.loads(result.output or "[]")
+    if result.returncode != 0:
+        excerpt = (result.output or "").strip()[-1000:]
+        raise SnapshotError(f"Could not list Restic snapshots: {excerpt or 'restic exited without output'}")
+    raw = _parse_restic_json(result.output, [])
     if not isinstance(raw, list):
         return []
     snapshots = [_public_snapshot(snapshot) for snapshot in raw if isinstance(snapshot, dict)]

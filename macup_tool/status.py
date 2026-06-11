@@ -172,6 +172,27 @@ def mark_failed(run_id: str, log_path: Path, error: str) -> dict[str, Any]:
     return save_status(status)
 
 
+def mark_stopped(run_id: str = "", log_path: Path | None = None, message: str = "Backup stopped by user.") -> dict[str, Any]:
+    status = load_status()
+    latest_log = str(log_path) if log_path else str(status.get("latest_log") or "")
+    status.update(
+        {
+            "state": "failed",
+            "last_result": "failed",
+            "last_finished_at": iso(),
+            "active_run_id": "",
+            "latest_log": latest_log,
+            "last_error": message[:1000],
+            "progress_phase": "cancelled",
+            "progress_message": "Backup stopped",
+            "progress_updated_at": iso(),
+        }
+    )
+    if run_id:
+        status["active_run_id"] = ""
+    return save_status(status)
+
+
 def next_due_at(config: dict[str, Any], status: dict[str, Any]) -> str:
     last_success = parse_iso(status.get("last_success_at"))
     if last_success is None:
@@ -230,6 +251,10 @@ def summarize(config: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
         "progress_phase": status.get("progress_phase") or "",
         "progress_message": status.get("progress_message") or "",
         "progress_percent": status.get("progress_percent"),
+        "progress_bytes_done": int(status.get("progress_bytes_done") or 0),
+        "progress_total_bytes": int(status.get("progress_total_bytes") or 0),
+        "progress_files_done": int(status.get("progress_files_done") or 0),
+        "progress_total_files": int(status.get("progress_total_files") or 0),
         "progress_current": int(status.get("progress_current") or 0),
         "progress_total": int(status.get("progress_total") or 0),
     }
@@ -346,11 +371,11 @@ def xbar_output(config: dict[str, Any], status: dict[str, Any], cli: str | None 
     cli_path = cli or str(paths.cli_path())
     log_path = summary["latest_log"]
     restore = load_restore_status_for_xbar()
-    icon = "🟠" if summary["running"] else ("🔴" if summary["failed"] or summary["stale"] else "🟢")
+    icon = "●"
     manager = manager_state.probe()
     manager_running = bool(manager.get("running"))
-    menu_title = f"{icon} ▼" if manager_running else icon
-    menu_color = ORANGE if manager_running else summary["color"]
+    menu_title = f"{icon} ▾" if manager_running else icon
+    menu_color = summary["color"]
     lines = [
         f"{menu_title} | color={menu_color}",
         "---",
@@ -391,6 +416,12 @@ def xbar_output(config: dict[str, Any], status: dict[str, Any], cli: str | None 
             ),
         ]
     )
+    if summary["running"]:
+        lines.append(
+            "Stop Backup | "
+            f"shell={_xbar_quote(cli_path)} param1=backup param2=--stop "
+            f"terminal=false refresh=true color={RED}"
+        )
     if manager_running:
         lines.append(
             "Close Manager | "

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from macup_tool.backup import BackupError, BackupLock, build_backup_commands, ensure_repository, snapshot_ids_to_forget
+from macup_tool.backup import BackupError, BackupLock, build_backup_commands, ensure_repository, snapshot_ids_to_forget, stop_backup
 from macup_tool.config import default_config
 from macup_tool.logutil import prune_logs
 from macup_tool.process import CommandResult
@@ -67,6 +67,22 @@ class BackupPlanningTests(unittest.TestCase):
             lock = BackupLock(lock_path)
             self.assertTrue(lock.acquire("run"))
             lock.release()
+
+    def test_stop_backup_clears_lock_and_marks_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"MACUP_STATE_DIR": tmp}):
+                lock_path = Path(tmp) / "backup.lock"
+                lock_path.write_text('{"pid": 424242, "run_id": "run"}', encoding="utf-8")
+                with patch("macup_tool.backup.process_alive", return_value=False):
+                    result = stop_backup()
+
+                self.assertTrue(result["stopped"])
+                self.assertFalse(lock_path.exists())
+                from macup_tool.status import load_status
+
+                status = load_status()
+                self.assertEqual(status["progress_phase"], "cancelled")
+                self.assertEqual(status["active_run_id"], "")
 
     def test_ensure_repository_does_not_init_on_wrong_password(self):
         cfg = default_config()

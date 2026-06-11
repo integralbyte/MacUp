@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import keychain, paths
-from .config import MACUP_TAG, RUN_TAG_PREFIX, repository, rclone_config_path, upload_limit, validate_config
+from .config import MACUP_TAG, RUN_TAG_PREFIX, normalize_sources, repository, rclone_config_path, upload_limit, validate_config
 from .logutil import RunLogger, prune_logs
 from .process import CommandError, CommandResult, run_streamed
 from .rclone_config import rclone_bin
@@ -201,12 +201,15 @@ def restic_base_args(config: dict[str, Any]) -> list[str]:
 
 def build_backup_commands(config: dict[str, Any], run_tag: str) -> list[BackupCommand]:
     sources = [str(Path(source).expanduser()) for source in config.get("sources", [])]
+    exclude_args: list[str] = []
+    for excluded in normalize_sources(config.get("excludes", [])):
+        exclude_args.extend(["--exclude", str(Path(excluded).expanduser())])
     mode = config.get("path_mode", "preserve")
     base = restic_base_args(config)
     if mode == "preserve":
         return [
             BackupCommand(
-                args=base + ["backup", "--json", "--tag", MACUP_TAG, "--tag", run_tag] + sources,
+                args=base + ["backup", "--json", "--tag", MACUP_TAG, "--tag", run_tag] + exclude_args + sources,
                 cwd=None,
             )
         ]
@@ -215,7 +218,7 @@ def build_backup_commands(config: dict[str, Any], run_tag: str) -> list[BackupCo
         path = Path(source)
         commands.append(
             BackupCommand(
-                args=base + ["backup", "--json", "--tag", MACUP_TAG, "--tag", run_tag, path.name],
+                args=base + ["backup", "--json", "--tag", MACUP_TAG, "--tag", run_tag] + exclude_args + [path.name],
                 cwd=str(path.parent),
             )
         )

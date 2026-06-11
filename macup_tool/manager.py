@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ from .logutil import RunLogger
 from . import logutil
 from .reset import CONFIRMATION_TEXT, reset_local_state
 from .restore import detach_restore, load_restore_status
-from .status import json_output, load_status, summarize
+from .status import json_output, load_status, save_status, summarize
 from .timeutil import iso
 
 
@@ -76,6 +77,119 @@ def _question_payload(question: rclone_config.RcloneQuestion) -> dict[str, Any]:
 
 def _install_ready() -> bool:
     return paths.xbar_plugin_path().exists() and paths.launch_agent_path().exists()
+
+
+def _format_bytes(value: Any) -> str:
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        size = 0
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    unit = 0
+    while size >= 1024 and unit < len(units) - 1:
+        size /= 1024
+        unit += 1
+    if unit == 0:
+        return f"{int(size)} {units[unit]}"
+    return f"{size:.1f} {units[unit]}"
+
+
+def _format_duration(value: Any) -> str:
+    try:
+        seconds = int(float(value or 0))
+    except (TypeError, ValueError):
+        seconds = 0
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def _restic_error_message(data: dict[str, Any]) -> str:
+    error = data.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or "")
+    return str(error or data.get("message") or "")
+
+
+def _format_restic_json_log(data: Any) -> str | None:
+    if isinstance(data, list):
+        return f"Snapshot retention checked: {len(data)} snapshot{'s' if len(data) != 1 else ''} found."
+    if not isinstance(data, dict):
+        return None
+    message_type = data.get("message_type")
+    if message_type == "status":
+        return None
+    if message_type == "summary":
+        snapshot_id = str(data.get("snapshot_id") or "")
+        total_files = int(data.get("total_files_processed") or 0)
+        added = _format_bytes(data.get("data_added_packed") or data.get("data_added") or 0)
+        duration = _format_duration(data.get("total_duration"))
+        short_id = snapshot_id[:8] if snapshot_id else "snapshot"
+        return f"Snapshot {short_id} saved. Processed {total_files:,} files in {duration}; added {added}."
+    if message_type == "error":
+        item = str(data.get("item") or "source item")
+        message = _restic_error_message(data) or "could not be read"
+        return f"Skipped {item}: {message}"
+    if message_type == "exit_error":
+        message = str(data.get("message") or "Restic exited with an error.")
+        code = data.get("code")
+        prefix = "Restic warning" if code == 3 else "Restic error"
+        return f"{prefix}: {message}"
+    return None
+
+
+def manager_log_tail(content: str, *, max_lines: int = 120) -> str:
+    formatted: list[str] = []
+    seen: set[str] = set()
+    lock_load_re = re.compile(r"^Load\(<lock/[^>]+>, 0, 0\) ")
+    for line in content.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if lock_load_re.match(text):
+            continue
+        if text.startswith("$ "):
+            if " backup " in text and " --json " in text:
+                display = "Starting Restic backup."
+            elif " snapshots " in text and " --json" in text:
+                display = "Checking snapshot retention."
+            elif " forget " in text:
+                display = "Pruning old snapshots."
+            else:
+                display = text
+        else:
+            try:
+                display = _format_restic_json_log(json.loads(text))
+            except json.JSONDecodeError:
+                display = text
+        if not display:
+            continue
+        if display.startswith("Skipped "):
+            if display in seen:
+                continue
+            seen.add(display)
+        formatted.append(display)
+    return "\n".join(formatted[-max_lines:]) if formatted else "No visible log entries yet."
+
+
+def _issue_items(status: dict[str, Any]) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    issues = status.get("backup_issues")
+    if not isinstance(issues, list):
+        return []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        item = str(issue.get("item") or "").strip()
+        if item and item not in seen:
+            seen.add(item)
+            items.append(item)
+    return items
 
 
 def _setup_state(config: dict[str, Any], restic_password_set: bool) -> dict[str, Any]:
@@ -287,7 +401,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 if not latest_resolved.is_file():
                     raise ValueError("Latest log path is not a file.")
                 content = latest_resolved.read_text(encoding="utf-8", errors="replace")
-                tail = "\n".join(content.splitlines()[-120:])
+                tail = manager_log_tail(content)
             except Exception as exc:
                 tail = f"Log unavailable: {exc}"
             self._send_json({"ok": True, "log": logutil.redact(tail)})
@@ -472,6 +586,32 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/backup-stop":
                 self._send_json({"ok": True, **stop_backup()})
+                return
+            if parsed.path == "/api/backup-issues/ignore":
+                status = load_status()
+                issue_items = _issue_items(status)
+                if not issue_items:
+                    raise ValueError("There are no skipped backup items to ignore.")
+                cfg = load_config()
+                excludes = normalize_sources(list(cfg.get("excludes") or []) + issue_items)
+                added = [item for item in issue_items if item not in normalize_sources(cfg.get("excludes", []))]
+                cfg["excludes"] = excludes
+                saved = save_config(cfg)
+                status["last_warning"] = ""
+                status["backup_issues"] = []
+                save_status(status)
+                refresh_xbar()
+                self._send_json({"ok": True, "config": saved, "ignored": added})
+                return
+            if parsed.path == "/api/excludes/remove":
+                item = str(body.get("path") or "").strip()
+                if not item:
+                    raise ValueError("Ignored path is required.")
+                cfg = load_config()
+                cfg["excludes"] = [path for path in normalize_sources(cfg.get("excludes", [])) if path != item]
+                saved = save_config(cfg)
+                refresh_xbar()
+                self._send_json({"ok": True, "config": saved})
                 return
             if parsed.path == "/api/snapshot/restore":
                 snapshot_id = str(body.get("snapshot") or "")
@@ -688,6 +828,21 @@ def manager_html(token: str) -> str:
       <div class="actions"><button id="setupInstallAction" class="primary">Install Scheduler and Xbar</button></div>
     </section>
 
+    <section id="backupIssuesSection" class="hidden" data-normal>
+      <h2>Backup Warnings</h2>
+      <div id="backupWarning" class="warning"></div>
+      <div id="backupIssues" class="snapshot-list"></div>
+      <div id="backupIssueActions" class="actions" style="margin-top:12px">
+        <button id="retrySkippedBackup">Try Backup Again</button>
+        <button id="ignoreSkippedItems" class="primary">Ignore Skipped Items</button>
+      </div>
+      <div id="ignoredPathsBlock" class="hidden" style="margin-top:14px">
+        <strong>Ignored paths</strong>
+        <p class="muted">These paths are passed to Restic as excludes on future backups.</p>
+        <div id="ignoredPaths" class="snapshot-list"></div>
+      </div>
+    </section>
+
     <section id="statusSection" data-normal>
       <h2>Current Status</h2>
       <div class="status-grid">
@@ -696,12 +851,6 @@ def manager_html(token: str) -> str:
         <div class="metric"><span>Next backup</span><strong id="metricNext">Unknown</strong></div>
         <div class="metric"><span>Latest log</span><strong id="metricLog">None</strong></div>
       </div>
-    </section>
-
-    <section id="backupIssuesSection" class="hidden" data-normal>
-      <h2>Backup Warnings</h2>
-      <div id="backupWarning" class="warning"></div>
-      <div id="backupIssues" class="snapshot-list"></div>
     </section>
 
     <section id="activitySection" data-normal>
@@ -1170,12 +1319,14 @@ def manager_html(token: str) -> str:
       document.getElementById('backupProgressText').textContent = parts.join(' - ');
       document.getElementById('backupProgress').value = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
     }}
-    function renderBackupIssues(summary) {{
+    function renderBackupIssues(summary, config) {{
       const issues = Array.isArray(summary.backup_issues) ? summary.backup_issues : [];
+      const ignored = Array.isArray(config.excludes) ? config.excludes : [];
       const warning = summary.last_warning || '';
-      setVisible('backupIssuesSection', Boolean(warning || issues.length));
-      if (!warning && !issues.length) return;
-      document.getElementById('backupWarning').textContent = warning || 'Backup completed with warnings.';
+      setVisible('backupIssuesSection', Boolean(warning || issues.length || ignored.length));
+      if (!warning && !issues.length && !ignored.length) return;
+      document.getElementById('backupWarning').textContent = warning || (ignored.length ? 'Ignored paths are active.' : 'Backup completed with warnings.');
+      document.getElementById('backupIssueActions').classList.toggle('hidden', !issues.length);
       const box = document.getElementById('backupIssues');
       box.innerHTML = '';
       issues.slice(0, 25).forEach(issue => {{
@@ -1195,6 +1346,22 @@ def manager_html(token: str) -> str:
         more.textContent = String(issues.length - 25) + ' more warning items are in the latest log.';
         box.append(more);
       }}
+      const ignoredBlock = document.getElementById('ignoredPathsBlock');
+      const ignoredBox = document.getElementById('ignoredPaths');
+      ignoredBlock.classList.toggle('hidden', !ignored.length);
+      ignoredBox.innerHTML = '';
+      ignored.forEach(path => {{
+        const row = document.createElement('div');
+        row.className = 'snapshot-card';
+        const item = document.createElement('strong');
+        item.textContent = path;
+        const remove = document.createElement('button');
+        remove.textContent = 'Remove';
+        remove.className = 'danger';
+        remove.onclick = () => runAction(async () => removeIgnoredPath(path), remove);
+        row.append(item, remove);
+        ignoredBox.append(row);
+      }});
     }}
     function render(data) {{
       cfg = data.config;
@@ -1225,7 +1392,7 @@ def manager_html(token: str) -> str:
       renderRestoreStatus(data.restore);
       renderSetup(data);
       renderActivity(data);
-      renderBackupIssues(data.summary || {{}});
+      renderBackupIssues(data.summary || {{}}, cfg || {{}});
       syncSnapshotDownloadButtons();
       if (data.setup && !data.setup.complete && cfg.repository_mode === 'existing' && data.setup.onedrive && !data.setup.repository_selected && !repositoriesLoaded) {{
         loadRepositoryCandidates().catch(err => log('Repository discovery failed: ' + err.message));
@@ -1282,6 +1449,23 @@ def manager_html(token: str) -> str:
       render(full);
       const warnings = data.warnings && data.warnings.length ? '\\n' + data.warnings.join('\\n') : '';
       log('Saved.' + warnings);
+    }}
+    async function startBackupNow() {{
+      await api('/api/backup-now', {{method:'POST', body:{{}}}});
+      log('Backup started. Watching live status and log.');
+      startPolling();
+      await refresh();
+    }}
+    async function ignoreSkippedItems() {{
+      const data = await api('/api/backup-issues/ignore', {{method:'POST', body:{{}}}});
+      await refresh();
+      const count = (data.ignored || []).length;
+      log(count ? ('Ignored ' + count + ' skipped path' + (count === 1 ? '' : 's') + ' for future backups.') : 'Skipped paths were already ignored.');
+    }}
+    async function removeIgnoredPath(path) {{
+      await api('/api/excludes/remove', {{method:'POST', body:{{path}}}});
+      await refresh();
+      log('Removed ignored path: ' + path);
     }}
     async function verifyOrInitRepository() {{
       const mode = cfg && cfg.repository_mode;
@@ -1594,12 +1778,9 @@ def manager_html(token: str) -> str:
     document.getElementById('setupInstallAction').onclick = event => runAction(installSchedulerAndXbar, event.currentTarget);
     document.getElementById('repoInit').onclick = event => runAction(verifyOrInitRepository, event.currentTarget);
     document.getElementById('installAll').onclick = event => runAction(installSchedulerAndXbar, event.currentTarget);
-    document.getElementById('backupNow').onclick = event => runAction(async () => {{
-      await api('/api/backup-now', {{method:'POST', body:{{}}}});
-      log('Backup started. Watching live status and log.');
-      startPolling();
-      await refresh();
-    }}, event.currentTarget);
+    document.getElementById('backupNow').onclick = event => runAction(startBackupNow, event.currentTarget);
+    document.getElementById('retrySkippedBackup').onclick = event => runAction(startBackupNow, event.currentTarget);
+    document.getElementById('ignoreSkippedItems').onclick = event => runAction(ignoreSkippedItems, event.currentTarget);
     document.getElementById('stopBackup').onclick = event => runAction(async () => {{
       const data = await api('/api/backup-stop', {{method:'POST', body:{{}}}});
       await refresh();

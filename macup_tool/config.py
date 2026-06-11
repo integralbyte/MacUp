@@ -37,6 +37,7 @@ def default_config() -> dict[str, Any]:
         "log_retention_days": DEFAULT_LOG_RETENTION_DAYS,
         "path_mode": "preserve",
         "sources": [],
+        "excludes": [],
         "remote_name": DEFAULT_REMOTE_NAME,
         "repository_path": f"MacUp/{hostname}/restic",
         "repository": "",
@@ -77,6 +78,7 @@ def save_config(config: dict[str, Any]) -> dict[str, Any]:
     cfg = default_config()
     cfg.update(config)
     cfg["sources"] = normalize_sources(cfg.get("sources", []))
+    cfg["excludes"] = normalize_sources(cfg.get("excludes", []))
     errors = validate_config(cfg, require_sources=False)
     if errors:
         raise ValueError("; ".join(errors))
@@ -145,6 +147,7 @@ def validate_config(config: dict[str, Any], require_sources: bool = True) -> lis
         errors.append("repository mode must be new or existing")
 
     sources = normalize_sources(config.get("sources", []))
+    excludes = normalize_sources(config.get("excludes", []))
     if require_sources and not sources:
         errors.append("at least one source folder is required")
     for source in sources:
@@ -155,6 +158,10 @@ def validate_config(config: dict[str, Any], require_sources: bool = True) -> lis
             errors.append(f"source folder does not exist: {source}")
         elif require_sources and not path.is_dir():
             errors.append(f"source must be a folder: {source}")
+    for excluded in excludes:
+        path = Path(excluded).expanduser()
+        if not path.is_absolute():
+            errors.append(f"excluded path must be absolute: {excluded}")
     if path_mode == "flat":
         basenames: dict[str, str] = {}
         for source in sources:

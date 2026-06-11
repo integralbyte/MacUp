@@ -24,10 +24,13 @@ class BackupPlanningTests(unittest.TestCase):
         cfg = default_config()
         cfg["repository"] = "/tmp/repo"
         cfg["sources"] = ["/Users/example/Documents", "/Users/example/Desktop"]
+        cfg["excludes"] = ["/Users/example/Documents/private"]
         commands = build_backup_commands(cfg, "macup-run-test")
         self.assertEqual(len(commands), 1)
         self.assertIsNone(commands[0].cwd)
         self.assertIn("--json", commands[0].args)
+        self.assertIn("--exclude", commands[0].args)
+        self.assertIn("/Users/example/Documents/private", commands[0].args)
         self.assertIn("/Users/example/Documents", commands[0].args)
         self.assertIn("/Users/example/Desktop", commands[0].args)
 

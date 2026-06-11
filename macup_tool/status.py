@@ -382,6 +382,24 @@ def _restore_progress_line(restore: dict[str, Any]) -> str | None:
     return f"Restore: {message} | disabled=true"
 
 
+def _warning_for_xbar(summary: dict[str, Any]) -> str:
+    issues = summary.get("backup_issues")
+    if isinstance(issues, list) and issues:
+        count = len(issues)
+        noun = "item" if count == 1 else "items"
+        return f"{count} source {noun} were skipped." if count != 1 else "1 source item was skipped."
+    warning = str(summary.get("last_warning") or "")
+    count_match = re.search(r"\b(\d+)\s+source\s+items?\s+were\s+skipped\b", warning, re.IGNORECASE)
+    if count_match:
+        count = int(count_match.group(1))
+        noun = "item" if count == 1 else "items"
+        verb = "was" if count == 1 else "were"
+        return f"{count} source {noun} {verb} skipped."
+    if "was skipped" in warning or "were skipped" in warning:
+        return "Source items were skipped."
+    return "Backup completed with warnings."
+
+
 def xbar_output(config: dict[str, Any], status: dict[str, Any], cli: str | None = None) -> str:
     summary = summarize(config, status)
     cli_path = cli or str(paths.cli_path())
@@ -410,7 +428,7 @@ def xbar_output(config: dict[str, Any], status: dict[str, Any], cli: str | None 
         safe_error = summary["last_error"].replace("|", "/").replace("\n", " ")[:70]
         lines.append(f"Last error: {safe_error} | color={RED} disabled=true")
     if summary["last_warning"]:
-        safe_warning = summary["last_warning"].replace("|", "/").replace("\n", " ")[:70]
+        safe_warning = _warning_for_xbar(summary).replace("|", "/").replace("\n", " ")
         lines.append(f"Warning: {safe_warning} | color={ORANGE} disabled=true")
     if log_path:
         lines.append(

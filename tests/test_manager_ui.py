@@ -1,6 +1,6 @@
 import unittest
 
-from macup_tool.manager import manager_html
+from macup_tool.manager import manager_html, manager_log_tail
 
 
 class ManagerUiTests(unittest.TestCase):
@@ -72,6 +72,38 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn('id="stopBackup"', html)
         self.assertIn("/api/backup-stop", html)
         self.assertIn("renderActivity", html)
+
+    def test_manager_has_skipped_item_retry_and_ignore_controls(self):
+        html = manager_html("test-token")
+        self.assertIn('id="backupIssuesSection"', html)
+        self.assertIn('id="retrySkippedBackup"', html)
+        self.assertIn('id="ignoreSkippedItems"', html)
+        self.assertIn('id="ignoredPaths"', html)
+        self.assertIn("/api/backup-issues/ignore", html)
+        self.assertIn("/api/excludes/remove", html)
+        self.assertIn("removeIgnoredPath", html)
+
+    def test_manager_log_tail_hides_benign_lock_noise_and_formats_restic_json(self):
+        raw = "\n".join(
+            [
+                "MacUp log started at 2026-06-11T12:00:14Z",
+                "$ /opt/homebrew/bin/restic -o rclone.program=/usr/local/bin/rclone backup --json --tag macup /tmp/source",
+                "Load(<lock/f21d28abce>, 0, 0) returned error, retrying after 1s: unexpected EOF",
+                "Load(<lock/f21d28abce>, 0, 0) failed: <lock/f21d28abce> does not exist",
+                '{"message_type":"status","percent_done":0.5}',
+                '{"message_type":"error","error":{"message":"operation not permitted"},"during":"scan","item":"/Users/ace/Pictures/Photos Library.photoslibrary"}',
+                '{"message_type":"error","error":{"message":"operation not permitted"},"during":"archival","item":"/Users/ace/Pictures/Photos Library.photoslibrary"}',
+                '{"message_type":"summary","total_files_processed":42,"data_added_packed":2048,"total_duration":65,"snapshot_id":"abcdef123456"}',
+                '{"message_type":"exit_error","code":3,"message":"Warning: at least one source file could not be read"}',
+            ]
+        )
+        output = manager_log_tail(raw)
+        self.assertIn("Starting Restic backup.", output)
+        self.assertIn("Skipped /Users/ace/Pictures/Photos Library.photoslibrary", output)
+        self.assertIn("Snapshot abcdef12 saved. Processed 42 files in 1m 5s; added 2.0 KiB.", output)
+        self.assertIn("Restic warning: Warning: at least one source file could not be read", output)
+        self.assertNotIn("Load(<lock", output)
+        self.assertNotIn("percent_done", output)
 
 
 if __name__ == "__main__":

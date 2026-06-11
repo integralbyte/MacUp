@@ -25,7 +25,7 @@ class InstallArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"MACUP_XBAR_PLUGIN_DIR": tmp}):
                 target = xbar.install("/tmp/macup")
-                self.assertEqual(target.resolve(), (Path(tmp) / "macup.5s.sh").resolve())
+                self.assertEqual(target.resolve(), (Path(tmp) / "macup.10s.sh").resolve())
                 self.assertTrue(os.access(target, os.X_OK))
                 self.assertIn("/tmp/macup", target.read_text(encoding="utf-8"))
 
@@ -70,6 +70,18 @@ class InstallArtifactTests(unittest.TestCase):
 
             self.assertTrue(ok)
             self.assertEqual(first_line, "● | color=#2da44e")
+
+    def test_installer_clears_xbar_cache_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "xbar" / "cache"
+            cache.mkdir(parents=True)
+            cached = cache / "stale"
+            cached.write_text("stale", encoding="utf-8")
+            with patch("macup_tool.installer.paths.xbar_plugin_dir", return_value=Path(tmp) / "xbar" / "plugins"):
+                removed = installer.clear_xbar_cache()
+
+            self.assertIn(cached, removed)
+            self.assertFalse(cached.exists())
 
 
 if __name__ == "__main__":

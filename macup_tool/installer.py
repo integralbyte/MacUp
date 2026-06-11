@@ -160,6 +160,23 @@ def refresh_xbar() -> bool:
     return result.returncode == 0
 
 
+def clear_xbar_cache() -> list[Path]:
+    cache_dir = paths.xbar_plugin_dir().parent / "cache"
+    removed: list[Path] = []
+    if not cache_dir.exists():
+        return removed
+    for item in cache_dir.iterdir():
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+            removed.append(item)
+        except OSError:
+            continue
+    return removed
+
+
 def verify_xbar_plugin_output(plugin_path: Path) -> tuple[bool, str]:
     result = subprocess.run(
         [str(plugin_path)],
@@ -202,16 +219,20 @@ def install_all(load: bool = True) -> dict[str, Any]:
     xbar_plugin = xbar.install(str(runtime_cli))
     launch_agent = launchd.install(str(runtime_cli), load=load)
     quit_xbar()
+    cleared_cache = clear_xbar_cache()
     launched, xbar_message = launch_xbar()
-    refreshed = refresh_xbar()
-    time.sleep(0.5)
-    refreshed = refresh_xbar() or refreshed
+    time.sleep(1.0)
+    refreshed = False
+    for _ in range(3):
+        refreshed = refresh_xbar() or refreshed
+        time.sleep(0.4)
     plugin_ok, plugin_first_line = verify_xbar_plugin_output(xbar_plugin)
     return {
         "runtime_cli": str(runtime_cli),
         "xbar_plugin": str(xbar_plugin),
         "xbar_app": str(ensure_xbar_app_installed() or find_xbar_app() or ""),
         "launch_agent": str(launch_agent),
+        "xbar_cache_cleared": len(cleared_cache),
         "xbar_launched": launched,
         "xbar_message": xbar_message,
         "xbar_plugin_ok": plugin_ok,

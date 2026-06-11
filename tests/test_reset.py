@@ -23,7 +23,7 @@ class ResetTests(unittest.TestCase):
             with patch.dict(os.environ, {"MACUP_CONFIG_DIR": str(config_dir), "MACUP_STATE_DIR": str(state_dir)}), patch(
                 "macup_tool.reset.launchd.uninstall", return_value=Path("/tmp/com.macup.backup.plist")
             ) as launchd_uninstall, patch(
-                "macup_tool.reset.xbar.uninstall", return_value=[Path("/tmp/macup.5s.sh")]
+                "macup_tool.reset.xbar.uninstall", return_value=[Path("/tmp/macup.10s.sh")]
             ) as xbar_uninstall, patch(
                 "macup_tool.reset.keychain.delete_password", return_value=True
             ) as delete_password, patch(

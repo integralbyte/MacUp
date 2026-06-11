@@ -82,7 +82,7 @@ def xbar_plugin_dir() -> Path:
 
 
 def xbar_plugin_path() -> Path:
-    return xbar_plugin_dir() / "macup.5s.sh"
+    return xbar_plugin_dir() / "macup.10s.sh"
 
 
 def launch_agent_path() -> Path:

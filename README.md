@@ -48,6 +48,8 @@ In the manager:
 
 After a reset, run `./macup manager` or double-click `Install MacUp.command` again. MacUp will start from the onboarding flow because local settings and Keychain secrets have been removed.
 
+Important reset detail: reset does not delete backup data from OneDrive. If you reuse the same repository path, enter the original Restic password to reconnect to those backups. If you choose a new password, change the repository path to a new empty folder before initializing, otherwise Restic will reject the password because the existing repository was encrypted with the old one.
+
 ## Defaults
 
 - Backup interval: `24` hours.

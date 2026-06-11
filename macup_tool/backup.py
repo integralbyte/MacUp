@@ -146,13 +146,33 @@ def run_restic(config: dict[str, Any], args: list[str], logger=None, check: bool
     return run_streamed(restic_base_args(config) + args, env=restic_env(config), logger=logger, check=check)
 
 
+def _repository_password_mismatch(output: str) -> bool:
+    text = output.lower()
+    return "wrong password" in text or "no key found" in text
+
+
+def _repository_password_mismatch_error(config: dict[str, Any]) -> BackupError:
+    return BackupError(
+        "An existing Restic repository was found at "
+        f"{repository(config)}, but the saved password cannot unlock it. "
+        "This commonly happens after resetting MacUp and entering a new password while reusing the same OneDrive repository path. "
+        "To reconnect to existing backups, save the original Restic password. "
+        "To start a brand new backup set, change the repository path to a new empty folder, then initialize again. "
+        "MacUp did not delete or overwrite the existing OneDrive repository."
+    )
+
+
 def ensure_repository(config: dict[str, Any], logger: RunLogger) -> None:
     probe = run_restic(config, ["snapshots", "--json"], logger=logger, check=False)
     if probe.returncode == 0:
         return
+    if _repository_password_mismatch(probe.output):
+        raise _repository_password_mismatch_error(config)
     logger.write("Repository probe failed; trying restic init.")
     init = run_restic(config, ["init"], logger=logger, check=False)
     if init.returncode != 0:
+        if _repository_password_mismatch(probe.output) or "config file already exists" in init.output.lower():
+            raise _repository_password_mismatch_error(config)
         raise BackupError(
             "Unable to open or initialize Restic repository. "
             f"Probe output: {probe.output[-1000:]} Init output: {init.output[-1000:]}"

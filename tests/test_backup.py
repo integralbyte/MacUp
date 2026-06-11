@@ -2,11 +2,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from macup_tool.backup import BackupLock, build_backup_commands, snapshot_ids_to_forget
+from macup_tool.backup import BackupError, BackupLock, build_backup_commands, ensure_repository, snapshot_ids_to_forget
 from macup_tool.config import default_config
 from macup_tool.logutil import prune_logs
+from macup_tool.process import CommandResult
 
 
 class BackupPlanningTests(unittest.TestCase):
@@ -66,6 +67,30 @@ class BackupPlanningTests(unittest.TestCase):
             lock = BackupLock(lock_path)
             self.assertTrue(lock.acquire("run"))
             lock.release()
+
+    def test_ensure_repository_does_not_init_on_wrong_password(self):
+        cfg = default_config()
+        cfg["remote_name"] = "remote"
+        cfg["repository_path"] = "MacUp/host/restic"
+        probe = CommandResult(
+            args=["restic", "snapshots"],
+            returncode=12,
+            output='{"message_type":"exit_error","code":12,"message":"Fatal: wrong password or no key found"}',
+        )
+        logger = Mock()
+        with patch("macup_tool.backup.run_restic", return_value=probe) as run_restic:
+            with self.assertRaisesRegex(BackupError, "original Restic password"):
+                ensure_repository(cfg, logger)
+        run_restic.assert_called_once()
+        self.assertFalse(logger.write.called)
+
+    def test_ensure_repository_explains_existing_repo_after_init_conflict(self):
+        cfg = default_config()
+        probe = CommandResult(args=["restic", "snapshots"], returncode=1, output="repository is not initialized")
+        init = CommandResult(args=["restic", "init"], returncode=1, output="Fatal: config file already exists")
+        with patch("macup_tool.backup.run_restic", side_effect=[probe, init]):
+            with self.assertRaisesRegex(BackupError, "change the repository path"):
+                ensure_repository(cfg, Mock())
 
 
 if __name__ == "__main__":

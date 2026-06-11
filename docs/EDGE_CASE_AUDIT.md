@@ -51,6 +51,7 @@ Severity:
 | --- | --- | --- | --- |
 | Restic password missing | P0 | Backup/restore refuse to run and ask user to save it. | Add password health check in setup summary. |
 | Restic password lost by user | P0 | Setup warns user to store it elsewhere. | Cannot be recovered by design. |
+| App reset followed by new password for same OneDrive repo | P0 | Setup warns that old OneDrive backups require the original password; init refuses to overwrite and explains the recovery choices. | Add a first-class "start new repository path" button. |
 | rclone config encryption password missing | P1 | MacUp creates/stores a generated password in Keychain. | Add a repair/recreate path if Keychain item is deleted. |
 | Keychain command fails | P1 | Command failure bubbles to UI/CLI. | Friendlier explanation and retry action. |
 | Secrets in logs | P0 | Common token/password patterns are redacted. | Redaction is best-effort; keep adding patterns as new tools are used. |
@@ -73,7 +74,7 @@ Severity:
 | --- | --- | --- | --- |
 | Repository already exists | P1 | `restic snapshots --json` succeeds; init is skipped. | None known. |
 | Repository does not exist | P1 | Restic init is attempted. | Add clearer success state in UI. |
-| Wrong password for existing repo | P0 | Probe fails; init also fails; error is shown/logged. | Error wording should say wrong password is a likely cause. |
+| Wrong password for existing repo | P0 | Probe fails and MacUp does not attempt `restic init`; error explains original password vs new repository path choices. | Add inline recovery buttons for saving a different password or changing the repo path. |
 | Wrong remote/path accidentally creates a new repo | P0 | Changing repo location marks it uninitialized; scheduled backups pause until explicit init/probe. | Add confirmation modal before init of empty repo. |
 | Repo path contains invalid rclone characters | P1 | Remote name and repository path are prevalidated before saving. | Continue expanding validation if rclone documents more reserved characters. |
 

@@ -645,6 +645,7 @@ def manager_html(token: str) -> str:
 
     <section id="secretsSection" data-normal>
       <h2>Secrets</h2>
+      <p class="muted">If you reset MacUp and want to reconnect to existing OneDrive backups, enter the same Restic password you used before. A new password only works with a new empty repository path.</p>
       <div class="grid">
         <label>Restic password<input id="restic_password" type="password" autocomplete="new-password"></label>
         <label>Confirm password<input id="restic_password_confirm" type="password" autocomplete="new-password"></label>
@@ -771,7 +772,7 @@ def manager_html(token: str) -> str:
       const setup = data.setup || {{}};
       if (!setup.restic_password) return {{
         title: 'Step 1 of 5: Save the encryption password',
-        text: 'Choose the Restic password first. Without it, backups cannot be opened later.',
+        text: 'Choose the Restic password first. If reconnecting after reset, use the original password for the existing OneDrive repository.',
         sections: ['secretsSection']
       }};
       if (!setup.onedrive) return {{
@@ -873,6 +874,7 @@ def manager_html(token: str) -> str:
       const messages = [];
       if (data.config && !data.config.initialized) {{
         messages.push('Backups are paused until this repository location is initialized or probed.');
+        messages.push('If this OneDrive path already contains backups from before a reset, it can only be reopened with the original Restic password.');
       }}
       warning.textContent = messages.join('\\n');
       warning.classList.toggle('hidden', messages.length === 0);

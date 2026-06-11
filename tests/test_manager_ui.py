@@ -29,6 +29,12 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("closeManagerPage('Manager stopped')", html)
         self.assertIn("closeManagerPage('MacUp reset complete')", html)
 
+    def test_password_setup_warns_about_reset_reconnect_password(self):
+        html = manager_html("test-token")
+        self.assertIn("reconnect to existing OneDrive backups", html)
+        self.assertIn("use the original password", html)
+        self.assertIn("only be reopened with the original Restic password", html)
+
 
 if __name__ == "__main__":
     unittest.main()

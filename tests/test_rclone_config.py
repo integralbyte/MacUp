@@ -55,11 +55,19 @@ class RcloneConfigTests(unittest.TestCase):
 
         with patch("macup_tool.rclone_config.ensure_encrypted_config"), patch(
             "macup_tool.rclone_config._list_remote", side_effect=list_remote
+        ), patch(
+            "macup_tool.rclone_config._list_remote_recursive",
+            return_value=[
+                {"Name": "old", "IsDir": False, "ModTime": "2026-06-01T10:00:00Z"},
+                {"Name": "new", "IsDir": False, "ModTime": "2026-06-09T13:52:06Z"},
+            ],
         ):
             repos = rclone_config.discover_repositories(cfg)
 
         self.assertEqual([repo["path"] for repo in repos], ["MacUp/host-a/restic"])
         self.assertEqual(repos[0]["repository"], "rclone:remote:MacUp/host-a/restic")
+        self.assertEqual(repos[0]["last_backup_at"], "2026-06-09T13:52:06Z")
+        self.assertEqual(repos[0]["snapshot_file_count"], 2)
 
     def test_is_restic_repository_path_checks_required_markers(self):
         cfg = default_config()
@@ -81,6 +89,20 @@ class RcloneConfigTests(unittest.TestCase):
             "macup_tool.rclone_config._list_remote", return_value=partial_items
         ):
             self.assertFalse(rclone_config.is_restic_repository_path(cfg, "MacUp/host/restic"))
+
+    def test_repository_snapshot_info_compares_timezone_offsets(self):
+        cfg = default_config()
+        with patch(
+            "macup_tool.rclone_config._list_remote_recursive",
+            return_value=[
+                {"Name": "offset", "IsDir": False, "ModTime": "2026-06-09T13:52:06+02:00"},
+                {"Name": "utc", "IsDir": False, "ModTime": "2026-06-09T12:52:06Z"},
+            ],
+        ):
+            info = rclone_config.repository_snapshot_info(cfg, "MacUp/host/restic")
+
+        self.assertEqual(info["last_backup_at"], "2026-06-09T12:52:06Z")
+        self.assertEqual(info["snapshot_file_count"], 2)
 
     def test_list_repository_returns_safe_item_shape(self):
         cfg = default_config()

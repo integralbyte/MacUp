@@ -79,8 +79,11 @@ def _install_ready() -> bool:
 
 
 def _setup_state(config: dict[str, Any], restic_password_set: bool) -> dict[str, Any]:
-    repository_mode_ready = str(config.get("repository_mode") or "") in {"new", "existing"} or bool(config.get("initialized"))
-    repository_selected = str(config.get("repository_mode") or "") != "existing" or bool(config.get("repository_selected")) or bool(config.get("initialized"))
+    repository_mode = str(config.get("repository_mode") or "")
+    repository_mode_ready = repository_mode in {"new", "existing"} or bool(config.get("initialized"))
+    repository_selected = repository_mode != "existing" or bool(config.get("repository_selected")) or bool(config.get("initialized"))
+    repository_password_confirmed = repository_mode != "existing" or bool(config.get("repository_password_confirmed")) or bool(config.get("initialized"))
+    restic_password_ready = restic_password_set and repository_password_confirmed
     onedrive_ready = bool(config.get("rclone_configured")) or rclone_config.remote_exists(config)
     sources_ready = bool(normalize_sources(config.get("sources", [])))
     repository_ready = bool(config.get("initialized"))
@@ -88,13 +91,14 @@ def _setup_state(config: dict[str, Any], restic_password_set: bool) -> dict[str,
     return {
         "repository_mode": repository_mode_ready,
         "repository_selected": repository_selected,
-        "restic_password": restic_password_set,
+        "repository_password_confirmed": repository_password_confirmed,
+        "restic_password": restic_password_ready,
         "onedrive": onedrive_ready,
         "sources": sources_ready,
         "repository": repository_ready,
         "installed": installed,
         "xbar_running": is_xbar_running(),
-        "complete": repository_mode_ready and repository_selected and restic_password_set and onedrive_ready and sources_ready and repository_ready and installed,
+        "complete": repository_mode_ready and repository_selected and restic_password_ready and onedrive_ready and sources_ready and repository_ready and installed,
     }
 
 
@@ -116,6 +120,8 @@ def _record_repository_change(old_config: dict[str, Any], new_config: dict[str, 
         history.insert(0, entry)
     new_config["repository_history"] = history[:20]
     new_config["initialized"] = False
+    if str(new_config.get("repository_mode") or "") == "existing":
+        new_config["repository_password_confirmed"] = False
     return [
         "Repository location changed. Previous location was saved in Repository History, "
         "and backups are paused until you initialize/probe the new location."
@@ -367,6 +373,11 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 if len(password) < 8:
                     raise ValueError("Restic password must be at least 8 characters.")
                 keychain.store_password(keychain.RESTIC_SERVICE, keychain.RESTIC_ACCOUNT, password)
+                cfg = load_config()
+                if str(cfg.get("repository_mode") or "") == "existing" and cfg.get("repository_selected"):
+                    cfg["repository_password_confirmed"] = True
+                    cfg["initialized"] = False
+                    save_config(cfg)
                 self._send_json({"ok": True})
                 return
             if parsed.path == "/api/repository/mode":
@@ -377,6 +388,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 cfg["repository_mode"] = mode
                 cfg["initialized"] = False
                 cfg["repository_selected"] = mode == "new"
+                cfg["repository_password_confirmed"] = mode == "new"
                 if mode == "new":
                     cfg["repository_path"] = fresh_repository_path()
                 saved = save_config(cfg)
@@ -392,6 +404,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 cfg["repository_mode"] = "existing"
                 cfg["repository_path"] = repo_path
                 cfg["repository_selected"] = True
+                cfg["repository_password_confirmed"] = False
                 cfg["initialized"] = False
                 saved = save_config(cfg)
                 self._send_json({"ok": True, "config": saved})
@@ -433,9 +446,16 @@ class ManagerHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/repo/init":
                 cfg = load_config()
                 create = str(cfg.get("repository_mode") or "") != "existing"
-                with RunLogger(f"init-{run_id()}") as logger:
-                    ensure_repository(cfg, logger, create=create)
+                try:
+                    with RunLogger(f"init-{run_id()}") as logger:
+                        ensure_repository(cfg, logger, create=create)
+                except BackupError as exc:
+                    if str(cfg.get("repository_mode") or "") == "existing" and "password" in str(exc).lower():
+                        cfg["repository_password_confirmed"] = False
+                        save_config(cfg)
+                    raise
                 cfg["initialized"] = True
+                cfg["repository_password_confirmed"] = True
                 save_config(cfg)
                 self._send_json({"ok": True, "mode": cfg.get("repository_mode") or ""})
                 return
@@ -651,6 +671,19 @@ def manager_html(token: str) -> str:
       </div>
     </section>
 
+    <section id="repositorySetupSection" class="hidden">
+      <h2>Repository</h2>
+      <div class="metric"><span>Selected repository</span><strong id="setupRepositoryPath">None</strong></div>
+      <p id="setupRepositoryHint" class="muted"></p>
+      <div class="actions"><button id="setupRepositoryAction" class="primary">Continue</button></div>
+    </section>
+
+    <section id="schedulerSetupSection" class="hidden">
+      <h2>Scheduler and Xbar</h2>
+      <p class="muted">Install the background scheduler and menu bar status item. This is the last setup step.</p>
+      <div class="actions"><button id="setupInstallAction" class="primary">Install Scheduler and Xbar</button></div>
+    </section>
+
     <section id="statusSection" data-normal>
       <h2>Current Status</h2>
       <div class="status-grid">
@@ -692,7 +725,11 @@ def manager_html(token: str) -> str:
         <label>Restic password<input id="restic_password" type="password" autocomplete="new-password"></label>
         <label>Confirm password<input id="restic_password_confirm" type="password" autocomplete="new-password"></label>
       </div>
-      <div class="actions" style="margin-top:12px"><button id="savePassword" class="primary">Save Password</button><span id="passwordState" class="muted"></span></div>
+      <div class="actions" style="margin-top:12px">
+        <button id="savePassword" class="primary">Save Password</button>
+        <button id="chooseDifferentRepository" class="hidden">Choose Different Repository</button>
+        <span id="passwordState" class="muted"></span>
+      </div>
     </section>
 
     <section id="onedriveSection" data-normal>
@@ -807,6 +844,7 @@ def manager_html(token: str) -> str:
         await action();
       }} catch (err) {{
         log('Error: ' + (err && err.message ? err.message : String(err)));
+        try {{ await refresh(); }} catch (_) {{}}
       }} finally {{
         setBusy(button, false);
         syncSnapshotDownloadButtons();
@@ -850,7 +888,7 @@ def manager_html(token: str) -> str:
         if (!setup.repository) return {{
           title: 'Step 5: Verify repository',
           text: 'MacUp will open the selected repository with the original password. It will not create a new repository in reconnect mode.',
-          sections: ['backupRulesSection', 'advancedSection']
+          sections: ['repositorySetupSection']
         }};
         if (!setup.sources) return {{
           title: 'Step 6: Choose folders for future backups',
@@ -860,7 +898,7 @@ def manager_html(token: str) -> str:
         if (!setup.installed) return {{
           title: 'Step 7: Install scheduling and Xbar',
           text: 'Install the LaunchAgent scheduler and Xbar menu item so backups and status keep working.',
-          sections: ['advancedSection']
+          sections: ['schedulerSetupSection']
         }};
       }} else {{
         if (!setup.restic_password) return {{
@@ -881,12 +919,12 @@ def manager_html(token: str) -> str:
         if (!setup.repository) return {{
           title: 'Step 5: Initialize repository',
           text: 'MacUp picked a fresh repository path for the new backup set. Confirm it, then initialize.',
-          sections: ['backupRulesSection', 'advancedSection']
+          sections: ['repositorySetupSection']
         }};
         if (!setup.installed) return {{
           title: 'Step 6: Install scheduling and Xbar',
           text: 'Install the LaunchAgent scheduler and Xbar menu item so backups and status keep working.',
-          sections: ['advancedSection']
+          sections: ['schedulerSetupSection']
         }};
       }}
       return {{
@@ -898,9 +936,11 @@ def manager_html(token: str) -> str:
     function renderSetup(data) {{
       const complete = Boolean(data.setup && data.setup.complete);
       const normalSections = [...document.querySelectorAll('[data-normal]')].map(section => section.id);
+      const setupOnlySections = ['repositorySetupSection', 'schedulerSetupSection'];
       setVisible('setupFlow', !complete);
       if (complete) {{
         normalSections.forEach(id => setVisible(id, true));
+        setupOnlySections.forEach(id => setVisible(id, false));
         setVisible('outputSection', true);
         return;
       }}
@@ -909,6 +949,7 @@ def manager_html(token: str) -> str:
       document.getElementById('setupText').textContent = step.text;
       setVisible('setupModeChoice', Boolean(step.modeChoice));
       normalSections.forEach(id => setVisible(id, step.sections.includes(id)));
+      setupOnlySections.forEach(id => setVisible(id, step.sections.includes(id)));
       setVisible('outputSection', true);
       document.getElementById('advancedDetails').open = step.sections.includes('advancedSection');
     }}
@@ -980,7 +1021,10 @@ def manager_html(token: str) -> str:
         main.className = 'snapshot-main';
         const title = document.createElement('div');
         title.className = 'snapshot-title';
-        title.innerHTML = '<strong>' + escapeHtml(repo.path || 'Unknown path') + '</strong><span class="muted">' + escapeHtml(repo.repository || '') + '</span>';
+        const lastBackup = repo.last_backup_at ? relativeTime(repo.last_backup_at) : 'unknown';
+        const count = Number(repo.snapshot_file_count || 0);
+        const detail = 'Last backup: ' + lastBackup + (count ? ' | snapshots: ' + count : '');
+        title.innerHTML = '<strong>' + escapeHtml(repo.path || 'Unknown path') + '</strong><span class="muted">' + escapeHtml(detail) + '</span><span class="muted">' + escapeHtml(repo.repository || '') + '</span>';
         const actions = document.createElement('div');
         actions.className = 'snapshot-actions';
         const use = document.createElement('button');
@@ -1029,6 +1073,15 @@ def manager_html(token: str) -> str:
       warning.textContent = messages.join('\\n');
       warning.classList.toggle('hidden', messages.length === 0);
     }}
+    function renderRepositorySetup(data) {{
+      const repo = (data.config.remote_name || 'macup-onedrive') + ':' + (data.config.repository_path || '');
+      document.getElementById('setupRepositoryPath').textContent = repo;
+      const existing = data.config.repository_mode === 'existing';
+      document.getElementById('setupRepositoryAction').textContent = existing ? 'Verify Existing Repository' : 'Initialize New Repository';
+      document.getElementById('setupRepositoryHint').textContent = existing
+        ? 'This verifies the selected OneDrive repository with the password you just entered. It does not create or overwrite anything.'
+        : 'This creates a new encrypted Restic repository at the selected OneDrive path.';
+    }}
     function renderRestoreStatus(restore) {{
       const box = document.getElementById('restoreStatus');
       if (!restore || !restore.state || restore.state === 'idle') {{
@@ -1063,7 +1116,10 @@ def manager_html(token: str) -> str:
       document.getElementById('manual_repository_path').value = cfg.repository_path || '';
       document.getElementById('dot').style.background = data.summary.color;
       document.getElementById('statusText').textContent = data.summary.label + ' - last backup: ' + data.summary.last_backup_relative;
-      document.getElementById('passwordState').textContent = data.restic_password_set ? 'Stored in Keychain' : 'Not stored';
+      document.getElementById('passwordState').textContent = cfg.repository_mode === 'existing' && cfg.repository_selected && !(data.setup && data.setup.repository_password_confirmed)
+        ? 'Enter the original password for the selected repository'
+        : (data.restic_password_set ? 'Stored in Keychain' : 'Not stored');
+      setVisible('chooseDifferentRepository', cfg.repository_mode === 'existing' && Boolean(cfg.repository_selected) && !Boolean(cfg.initialized));
       document.getElementById('metricState').textContent = data.summary.label;
       document.getElementById('metricLast').textContent = data.summary.last_backup_relative;
       document.getElementById('metricNext').textContent = data.summary.next_backup_relative;
@@ -1074,6 +1130,7 @@ def manager_html(token: str) -> str:
       document.getElementById('installAll').textContent = data.setup && data.setup.installed ? 'Reinstall Scheduler and Xbar' : 'Install Scheduler and Xbar';
       renderRepositoryHistory(cfg.repository_history || []);
       renderRepositoryWarning(data);
+      renderRepositorySetup(data);
       renderRestoreStatus(data.restore);
       renderSetup(data);
       syncSnapshotDownloadButtons();
@@ -1132,6 +1189,22 @@ def manager_html(token: str) -> str:
       render(full);
       const warnings = data.warnings && data.warnings.length ? '\\n' + data.warnings.join('\\n') : '';
       log('Saved.' + warnings);
+    }}
+    async function verifyOrInitRepository() {{
+      const mode = cfg && cfg.repository_mode;
+      await api('/api/repo/init', {{method:'POST', body:{{}}}});
+      await refresh();
+      log(mode === 'existing' ? 'Repository verified with the original password.' : 'Repository initialized.');
+    }}
+    async function installSchedulerAndXbar() {{
+      const data = await api('/api/install', {{method:'POST', body:{{load:true}}}});
+      await refresh();
+      log([
+        'Installed runtime: ' + data.runtime_cli,
+        'Installed Xbar plugin: ' + data.xbar_plugin,
+        'Installed LaunchAgent: ' + data.launch_agent,
+        data.xbar_launched ? 'Xbar launched: ' + data.xbar_message : 'Xbar launch issue: ' + data.xbar_message
+      ].join('\\n'));
     }}
     async function chooseRepositoryMode(mode, button) {{
       await runAction(async () => {{
@@ -1260,6 +1333,24 @@ def manager_html(token: str) -> str:
     function escapeHtml(value) {{
       return String(value || '').replace(/[&<>"']/g, ch => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[ch]));
     }}
+    function relativeTime(value) {{
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return 'unknown';
+      const seconds = Math.round((date.getTime() - Date.now()) / 1000);
+      const divisions = [
+        ['year', 31536000],
+        ['month', 2592000],
+        ['week', 604800],
+        ['day', 86400],
+        ['hour', 3600],
+        ['minute', 60]
+      ];
+      const rtf = new Intl.RelativeTimeFormat(undefined, {{ numeric: 'auto' }});
+      for (const [unit, amount] of divisions) {{
+        if (Math.abs(seconds) >= amount) return rtf.format(Math.round(seconds / amount), unit);
+      }}
+      return rtf.format(seconds, 'second');
+    }}
     function snapshotSummary(snapshot) {{
       const paths = Array.isArray(snapshot.paths) ? snapshot.paths.join(', ') : '';
       return (snapshot.when || 'unknown time') + (paths ? ' - ' + paths : '');
@@ -1361,6 +1452,7 @@ def manager_html(token: str) -> str:
     }}, event.currentTarget);
     document.getElementById('chooseNewRepository').onclick = event => chooseRepositoryMode('new', event.currentTarget);
     document.getElementById('chooseExistingRepository').onclick = event => chooseRepositoryMode('existing', event.currentTarget);
+    document.getElementById('chooseDifferentRepository').onclick = event => chooseRepositoryMode('existing', event.currentTarget);
     document.getElementById('discoverRepositories').onclick = event => runAction(async () => {{
       repositoriesLoaded = false;
       await loadRepositoryCandidates();
@@ -1379,7 +1471,7 @@ def manager_html(token: str) -> str:
       document.getElementById('restic_password').value = '';
       document.getElementById('restic_password_confirm').value = '';
       await refresh();
-      log('Password stored in Keychain.');
+      log(cfg.repository_mode === 'existing' ? 'Original password saved for the selected repository. Next, verify it.' : 'Password stored in Keychain.');
     }}, event.currentTarget);
     document.getElementById('rcloneStart').onclick = event => showRcloneStartPrompt(event.currentTarget);
     document.getElementById('rcloneTest').onclick = event => runAction(async () => log((await api('/api/rclone/test', {{method:'POST', body:{{}}}})).output || 'Remote test OK.'), event.currentTarget);
@@ -1401,17 +1493,10 @@ def manager_html(token: str) -> str:
         }}
       }}, event.currentTarget);
     }};
-    document.getElementById('repoInit').onclick = event => runAction(async () => {{ await api('/api/repo/init', {{method:'POST', body:{{}}}}); await refresh(); log('Repository initialized.'); }}, event.currentTarget);
-    document.getElementById('installAll').onclick = event => runAction(async () => {{
-      const data = await api('/api/install', {{method:'POST', body:{{load:true}}}});
-      await refresh();
-      log([
-        'Installed runtime: ' + data.runtime_cli,
-        'Installed Xbar plugin: ' + data.xbar_plugin,
-        'Installed LaunchAgent: ' + data.launch_agent,
-        data.xbar_launched ? 'Xbar launched: ' + data.xbar_message : 'Xbar launch issue: ' + data.xbar_message
-      ].join('\\n'));
-    }}, event.currentTarget);
+    document.getElementById('setupRepositoryAction').onclick = event => runAction(verifyOrInitRepository, event.currentTarget);
+    document.getElementById('setupInstallAction').onclick = event => runAction(installSchedulerAndXbar, event.currentTarget);
+    document.getElementById('repoInit').onclick = event => runAction(verifyOrInitRepository, event.currentTarget);
+    document.getElementById('installAll').onclick = event => runAction(installSchedulerAndXbar, event.currentTarget);
     document.getElementById('backupNow').onclick = event => runAction(async () => {{
       await api('/api/backup-now', {{method:'POST', body:{{}}}});
       log('Backup started. Watching live status and log.');

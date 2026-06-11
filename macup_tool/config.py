@@ -42,6 +42,7 @@ def default_config() -> dict[str, Any]:
         "repository": "",
         "repository_history": [],
         "repository_selected": False,
+        "repository_password_confirmed": False,
         "rclone_config_path": str(paths.default_rclone_config_path()),
         "rclone_configured": False,
         "upload_limit": "",

@@ -13,6 +13,7 @@ class ConfigTests(unittest.TestCase):
         cfg = default_config()
         self.assertEqual(validate_config(cfg, require_sources=False), [])
         self.assertFalse(cfg["repository_selected"])
+        self.assertFalse(cfg["repository_password_confirmed"])
 
     def test_fresh_repository_path_uses_new_restic_folder(self):
         path = fresh_repository_path()

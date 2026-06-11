@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from . import keychain
@@ -202,6 +203,16 @@ def remote_path(config: dict[str, Any], subpath: str = "") -> str:
     return f"{remote}:{path}" if path else f"{remote}:"
 
 
+def _parse_lsjson_output(output: str) -> list[dict[str, Any]]:
+    try:
+        raw = json.loads(output or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse rclone folder listing.") from exc
+    if not isinstance(raw, list):
+        raise RuntimeError("Unexpected rclone folder listing.")
+    return [item for item in raw if isinstance(item, dict)]
+
+
 def _list_remote(config: dict[str, Any], subpath: str) -> list[dict[str, Any]]:
     result = subprocess.run(
         [rclone_bin(), "--config", str(rclone_config_path(config)), "lsjson", remote_path(config, subpath)],
@@ -213,13 +224,28 @@ def _list_remote(config: dict[str, Any], subpath: str) -> list[dict[str, Any]]:
     )
     if result.returncode != 0:
         raise RuntimeError(result.stdout.strip() or f"Could not list OneDrive path {subpath or '/'}")
-    try:
-        raw = json.loads(result.stdout or "[]")
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Could not parse rclone folder listing.") from exc
-    if not isinstance(raw, list):
-        raise RuntimeError("Unexpected rclone folder listing.")
-    return [item for item in raw if isinstance(item, dict)]
+    return _parse_lsjson_output(result.stdout)
+
+
+def _list_remote_recursive(config: dict[str, Any], subpath: str) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        [
+            rclone_bin(),
+            "--config",
+            str(rclone_config_path(config)),
+            "lsjson",
+            "--recursive",
+            remote_path(config, subpath),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=rclone_env(config),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout.strip() or f"Could not list OneDrive path {subpath or '/'}")
+    return _parse_lsjson_output(result.stdout)
 
 
 def _join_remote_subpath(parent: str, child: str) -> str:
@@ -243,10 +269,41 @@ def is_restic_repository_path(config: dict[str, Any], subpath: str) -> bool:
         return False
 
 
-def discover_repositories(config: dict[str, Any], root: str = "MacUp", max_depth: int = 3) -> list[dict[str, str]]:
+def repository_snapshot_info(config: dict[str, Any], repository_path: str) -> dict[str, Any]:
+    snapshot_path = _join_remote_subpath(repository_path, "snapshots")
+    try:
+        items = _list_remote_recursive(config, snapshot_path)
+    except Exception as exc:
+        return {
+            "last_backup_at": "",
+            "snapshot_file_count": 0,
+            "snapshot_scan_error": str(exc),
+        }
+    files = [item for item in items if not item.get("IsDir")]
+    mtimes = [str(item.get("ModTime") or "") for item in files if item.get("ModTime")]
+    latest = max(mtimes, key=_modtime_timestamp) if mtimes else ""
+    return {
+        "last_backup_at": latest,
+        "snapshot_file_count": len(files),
+        "snapshot_scan_error": "",
+    }
+
+
+def _modtime_timestamp(value: str) -> float:
+    try:
+        text = str(value or "").replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except ValueError:
+        return 0.0
+
+
+def discover_repositories(config: dict[str, Any], root: str = "MacUp", max_depth: int = 3) -> list[dict[str, Any]]:
     ensure_encrypted_config(config)
     start = normalize_repository_subpath(root or "MacUp")
-    candidates: list[dict[str, str]] = []
+    candidates: list[dict[str, Any]] = []
     visited: set[str] = set()
 
     def scan(path: str, depth: int) -> None:
@@ -258,11 +315,13 @@ def discover_repositories(config: dict[str, Any], root: str = "MacUp", max_depth
         except Exception:
             return
         if _looks_like_restic_repository(items):
+            snapshot_info = repository_snapshot_info(config, path)
             candidates.append(
                 {
                     "path": path,
                     "repository": f"rclone:{str(config.get('remote_name') or 'macup-onedrive').strip()}:{path}",
                     "label": path,
+                    **snapshot_info,
                 }
             )
             return

@@ -48,6 +48,11 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("Use This Repository", html)
         self.assertIn("Manual OneDrive repository path", html)
         self.assertIn("selectManualRepository", html)
+        self.assertIn("Last backup:", html)
+        self.assertIn("Verify Existing Repository", html)
+        self.assertIn("repositorySetupSection", html)
+        self.assertIn("schedulerSetupSection", html)
+        self.assertIn("Choose Different Repository", html)
         self.assertIn("!setup.repository_selected", html)
 
 

@@ -5,13 +5,23 @@ from pathlib import Path
 
 from unittest.mock import patch
 
-from macup_tool.config import default_config, load_config, repository, validate_config
+from macup_tool.config import default_config, fresh_repository_path, load_config, repository, validate_config
 
 
 class ConfigTests(unittest.TestCase):
     def test_default_config_is_valid_without_sources(self):
         cfg = default_config()
         self.assertEqual(validate_config(cfg, require_sources=False), [])
+
+    def test_fresh_repository_path_uses_new_restic_folder(self):
+        path = fresh_repository_path()
+        self.assertRegex(path, r"^MacUp/[^/]+/restic-\d{8}-\d{6}-[0-9a-f]{6}$")
+
+    def test_repository_mode_validation(self):
+        cfg = default_config()
+        cfg["repository_mode"] = "sideways"
+        errors = validate_config(cfg, require_sources=False)
+        self.assertTrue(any("repository mode" in error for error in errors))
 
     def test_repository_defaults_to_rclone_remote_and_path(self):
         cfg = default_config()

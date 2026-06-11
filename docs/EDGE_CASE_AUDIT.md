@@ -13,6 +13,7 @@ Severity:
 | Case | Severity | Current handling | Remaining gap |
 | --- | --- | --- | --- |
 | User opens manager before setup | P1 | Step-by-step setup shows only the active step. | Add "skip for now" where safe. |
+| User does not know whether setup is new or existing | P0 | Onboarding first asks "Start new backup set" vs "Reconnect existing backups"; new mode picks a fresh repository path and existing mode probes only. | Add richer path picker/browser for existing repositories. |
 | User reloads during setup | P1 | State is loaded from config/Keychain/status. | Rclone mid-flow state only lives in memory, so reloading during rclone questions may require restarting OneDrive setup. |
 | User cancels native folder picker | P2 | API returns an error; nothing is saved. | Inline source-picker error could be clearer. |
 | User cancels restore destination picker | P2 | API returns an error; restore does not start. | Inline restore-card error could be clearer. |
@@ -51,7 +52,7 @@ Severity:
 | --- | --- | --- | --- |
 | Restic password missing | P0 | Backup/restore refuse to run and ask user to save it. | Add password health check in setup summary. |
 | Restic password lost by user | P0 | Setup warns user to store it elsewhere. | Cannot be recovered by design. |
-| App reset followed by new password for same OneDrive repo | P0 | Setup warns that old OneDrive backups require the original password; init refuses to overwrite and explains the recovery choices. | Add a first-class "start new repository path" button. |
+| App reset followed by new password for same OneDrive repo | P0 | Onboarding asks new vs existing first. New mode picks a fresh repo path; existing mode requires the original password and never runs `restic init`. | Add automatic discovery of existing MacUp repository folders. |
 | rclone config encryption password missing | P1 | MacUp creates/stores a generated password in Keychain. | Add a repair/recreate path if Keychain item is deleted. |
 | Keychain command fails | P1 | Command failure bubbles to UI/CLI. | Friendlier explanation and retry action. |
 | Secrets in logs | P0 | Common token/password patterns are redacted. | Redaction is best-effort; keep adding patterns as new tools are used. |
@@ -74,6 +75,7 @@ Severity:
 | --- | --- | --- | --- |
 | Repository already exists | P1 | `restic snapshots --json` succeeds; init is skipped. | None known. |
 | Repository does not exist | P1 | Restic init is attempted. | Add clearer success state in UI. |
+| Reconnect mode path does not exist | P1 | MacUp probes only and explains that the OneDrive account/path/original password must match. | Add repository path browser. |
 | Wrong password for existing repo | P0 | Probe fails and MacUp does not attempt `restic init`; error explains original password vs new repository path choices. | Add inline recovery buttons for saving a different password or changing the repo path. |
 | Wrong remote/path accidentally creates a new repo | P0 | Changing repo location marks it uninitialized; scheduled backups pause until explicit init/probe. | Add confirmation modal before init of empty repo. |
 | Repo path contains invalid rclone characters | P1 | Remote name and repository path are prevalidated before saving. | Continue expanding validation if rclone documents more reserved characters. |

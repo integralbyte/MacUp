@@ -32,8 +32,17 @@ class ManagerUiTests(unittest.TestCase):
     def test_password_setup_warns_about_reset_reconnect_password(self):
         html = manager_html("test-token")
         self.assertIn("reconnect to existing OneDrive backups", html)
-        self.assertIn("use the original password", html)
-        self.assertIn("only be reopened with the original Restic password", html)
+        self.assertIn("original Restic password", html)
+        self.assertIn("Reconnect mode", html)
+
+    def test_onboarding_has_new_vs_existing_repository_choice(self):
+        html = manager_html("test-token")
+        self.assertIn("Start New Backup Set", html)
+        self.assertIn("Reconnect Existing Backups", html)
+        self.assertIn("/api/repository/mode", html)
+        self.assertIn("Initialize New Repository", html)
+        self.assertIn("Connect Existing Repository", html)
+        self.assertIn("['secretsSection', 'backupRulesSection', 'advancedSection']", html)
 
 
 if __name__ == "__main__":

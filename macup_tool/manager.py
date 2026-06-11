@@ -15,7 +15,7 @@ from typing import Any
 
 from . import keychain, manager_state, paths, rclone_config, snapshots
 from .backup import BackupError, detach_backup, ensure_repository, run_backup, run_id
-from .config import load_config, normalize_sources, repository, rclone_config_path, save_config, validate_config
+from .config import fresh_repository_path, load_config, normalize_sources, repository, rclone_config_path, save_config, validate_config
 from .doctor import checks
 from .installer import install_all, is_xbar_running, open_full_disk_access_settings, refresh_xbar
 from .logutil import RunLogger
@@ -79,18 +79,20 @@ def _install_ready() -> bool:
 
 
 def _setup_state(config: dict[str, Any], restic_password_set: bool) -> dict[str, Any]:
+    repository_mode_ready = str(config.get("repository_mode") or "") in {"new", "existing"} or bool(config.get("initialized"))
     onedrive_ready = bool(config.get("rclone_configured")) or rclone_config.remote_exists(config)
     sources_ready = bool(normalize_sources(config.get("sources", [])))
     repository_ready = bool(config.get("initialized"))
     installed = _install_ready()
     return {
+        "repository_mode": repository_mode_ready,
         "restic_password": restic_password_set,
         "onedrive": onedrive_ready,
         "sources": sources_ready,
         "repository": repository_ready,
         "installed": installed,
         "xbar_running": is_xbar_running(),
-        "complete": restic_password_set and onedrive_ready and sources_ready and repository_ready and installed,
+        "complete": repository_mode_ready and restic_password_set and onedrive_ready and sources_ready and repository_ready and installed,
     }
 
 
@@ -359,6 +361,18 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 keychain.store_password(keychain.RESTIC_SERVICE, keychain.RESTIC_ACCOUNT, password)
                 self._send_json({"ok": True})
                 return
+            if parsed.path == "/api/repository/mode":
+                mode = str(body.get("mode") or "")
+                if mode not in {"new", "existing"}:
+                    raise ValueError("Choose Start new backup set or Reconnect existing backups.")
+                cfg = load_config()
+                cfg["repository_mode"] = mode
+                cfg["initialized"] = False
+                if mode == "new":
+                    cfg["repository_path"] = fresh_repository_path()
+                saved = save_config(cfg)
+                self._send_json({"ok": True, "config": saved})
+                return
             if parsed.path == "/api/folders/pick":
                 self._send_json({"ok": True, "folders": pick_folders()})
                 return
@@ -395,11 +409,12 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/repo/init":
                 cfg = load_config()
+                create = str(cfg.get("repository_mode") or "") != "existing"
                 with RunLogger(f"init-{run_id()}") as logger:
-                    ensure_repository(cfg, logger)
+                    ensure_repository(cfg, logger, create=create)
                 cfg["initialized"] = True
                 save_config(cfg)
-                self._send_json({"ok": True})
+                self._send_json({"ok": True, "mode": cfg.get("repository_mode") or ""})
                 return
             if parsed.path == "/api/install":
                 self._send_json({"ok": True, **install_all(load=bool(body.get("load", True)))})
@@ -606,6 +621,10 @@ def manager_html(token: str) -> str:
       <div class="setup-step">
         <strong id="setupTitle">Loading</strong>
         <span id="setupText" class="muted"></span>
+        <div id="setupModeChoice" class="choice-grid hidden">
+          <button id="chooseNewRepository" class="primary">Start New Backup Set</button>
+          <button id="chooseExistingRepository">Reconnect Existing Backups</button>
+        </div>
       </div>
     </section>
 
@@ -770,28 +789,34 @@ def manager_html(token: str) -> str:
     }}
     function currentSetupStep(data) {{
       const setup = data.setup || {{}};
+      if (!setup.repository_mode) return {{
+        title: 'Step 1 of 6: Choose backup set',
+        text: 'Start a new encrypted backup set, or reconnect to backups that already exist in OneDrive.',
+        sections: [],
+        modeChoice: true
+      }};
       if (!setup.restic_password) return {{
-        title: 'Step 1 of 5: Save the encryption password',
-        text: 'Choose the Restic password first. If reconnecting after reset, use the original password for the existing OneDrive repository.',
+        title: 'Step 2 of 6: Save the encryption password',
+        text: data.config.repository_mode === 'existing' ? 'Enter the original Restic password for the existing OneDrive backups.' : 'Choose a new Restic password for this new backup set. Store it somewhere safe.',
         sections: ['secretsSection']
       }};
       if (!setup.onedrive) return {{
-        title: 'Step 2 of 5: Connect OneDrive',
+        title: 'Step 3 of 6: Connect OneDrive',
         text: 'Configure OneDrive in the browser, then choose the drive rclone should use.',
         sections: ['onedriveSection']
       }};
       if (!setup.sources) return {{
-        title: 'Step 3 of 5: Choose folders',
+        title: 'Step 4 of 6: Choose folders',
         text: 'Add the folders that should be backed up, then save them.',
         sections: ['sourceSection']
       }};
       if (!setup.repository) return {{
-        title: 'Step 4 of 5: Initialize the repository',
-        text: 'Confirm the repository location, then initialize or probe it before backups can run.',
-        sections: ['backupRulesSection', 'advancedSection']
+        title: 'Step 5 of 6: Connect repository',
+        text: data.config.repository_mode === 'existing' ? 'Confirm the existing repository path, then connect it with the original Restic password.' : 'MacUp picked a fresh repository path for the new backup set. Confirm it, then initialize.',
+        sections: data.config.repository_mode === 'existing' ? ['secretsSection', 'backupRulesSection', 'advancedSection'] : ['backupRulesSection', 'advancedSection']
       }};
       if (!setup.installed) return {{
-        title: 'Step 5 of 5: Install scheduling and Xbar',
+        title: 'Step 6 of 6: Install scheduling and Xbar',
         text: 'Install the LaunchAgent scheduler and Xbar menu item so backups and status keep working.',
         sections: ['advancedSection']
       }};
@@ -813,6 +838,7 @@ def manager_html(token: str) -> str:
       const step = currentSetupStep(data);
       document.getElementById('setupTitle').textContent = step.title;
       document.getElementById('setupText').textContent = step.text;
+      setVisible('setupModeChoice', Boolean(step.modeChoice));
       normalSections.forEach(id => setVisible(id, step.sections.includes(id)));
       setVisible('outputSection', true);
       document.getElementById('advancedDetails').open = step.sections.includes('advancedSection');
@@ -874,7 +900,11 @@ def manager_html(token: str) -> str:
       const messages = [];
       if (data.config && !data.config.initialized) {{
         messages.push('Backups are paused until this repository location is initialized or probed.');
-        messages.push('If this OneDrive path already contains backups from before a reset, it can only be reopened with the original Restic password.');
+        if (data.config.repository_mode === 'existing') {{
+          messages.push('Reconnect mode: MacUp will only open this repository with the original Restic password. It will not create a new repository here.');
+        }} else {{
+          messages.push('New backup set mode: if this path already exists, choose another path or reconnect with the original Restic password.');
+        }}
       }}
       warning.textContent = messages.join('\\n');
       warning.classList.toggle('hidden', messages.length === 0);
@@ -918,7 +948,8 @@ def manager_html(token: str) -> str:
       document.getElementById('metricNext').textContent = data.summary.next_backup_relative;
       document.getElementById('metricLog').textContent = data.summary.latest_log ? data.summary.latest_log.split('/').pop() : 'None';
       document.getElementById('backupNow').disabled = Boolean(data.summary.running);
-      document.getElementById('repoInit').textContent = cfg.initialized ? 'Reinitialize / Probe Repository' : 'Initialize Repository';
+      const repoMode = cfg.repository_mode || '';
+      document.getElementById('repoInit').textContent = cfg.initialized ? 'Reinitialize / Probe Repository' : (repoMode === 'existing' ? 'Connect Existing Repository' : (repoMode === 'new' ? 'Initialize New Repository' : 'Initialize Repository'));
       document.getElementById('installAll').textContent = data.setup && data.setup.installed ? 'Reinstall Scheduler and Xbar' : 'Install Scheduler and Xbar';
       renderRepositoryHistory(cfg.repository_history || []);
       renderRepositoryWarning(data);
@@ -977,6 +1008,17 @@ def manager_html(token: str) -> str:
       render(full);
       const warnings = data.warnings && data.warnings.length ? '\\n' + data.warnings.join('\\n') : '';
       log('Saved.' + warnings);
+    }}
+    async function chooseRepositoryMode(mode, button) {{
+      await runAction(async () => {{
+        const data = await api('/api/repository/mode', {{method:'POST', body:{{mode}}}});
+        render(await api('/api/config'));
+        if (mode === 'new') {{
+          log('New backup set selected. MacUp chose a fresh repository path: ' + data.config.repository_path);
+        }} else {{
+          log('Reconnect existing backups selected. Use the existing OneDrive path and original Restic password.');
+        }}
+      }}, button);
     }}
     function cleanQuestionName(name) {{
       const labels = {{
@@ -1192,6 +1234,8 @@ def manager_html(token: str) -> str:
       const data = await api('/api/folders/pick', {{method:'POST', body:{{}}}});
       renderSources([...(readConfig().sources || []), ...data.folders]);
     }}, event.currentTarget);
+    document.getElementById('chooseNewRepository').onclick = event => chooseRepositoryMode('new', event.currentTarget);
+    document.getElementById('chooseExistingRepository').onclick = event => chooseRepositoryMode('existing', event.currentTarget);
     document.getElementById('saveSources').onclick = event => runAction(save, event.currentTarget);
     document.getElementById('saveConfig').onclick = event => runAction(save, event.currentTarget);
     document.getElementById('savePassword').onclick = event => runAction(async () => {{

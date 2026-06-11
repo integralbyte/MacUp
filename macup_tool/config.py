@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,7 @@ DEFAULT_INTERVAL_HOURS = 24
 DEFAULT_RETENTION_COUNT = 14
 DEFAULT_LOG_RETENTION_DAYS = 14
 REMOTE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+REPOSITORY_MODES = {"", "new", "existing"}
 
 
 def host_name() -> str:
@@ -29,6 +31,7 @@ def default_config() -> dict[str, Any]:
     hostname = host_name()
     return {
         "version": CONFIG_VERSION,
+        "repository_mode": "",
         "backup_interval_hours": DEFAULT_INTERVAL_HOURS,
         "retention_count": DEFAULT_RETENTION_COUNT,
         "log_retention_days": DEFAULT_LOG_RETENTION_DAYS,
@@ -43,6 +46,12 @@ def default_config() -> dict[str, Any]:
         "upload_limit": "",
         "initialized": False,
     }
+
+
+def fresh_repository_path() -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    suffix = secrets.token_hex(3)
+    return f"MacUp/{host_name()}/restic-{stamp}-{suffix}"
 
 
 def load_config() -> dict[str, Any]:
@@ -129,6 +138,9 @@ def validate_config(config: dict[str, Any], require_sources: bool = True) -> lis
     path_mode = config.get("path_mode")
     if path_mode not in {"preserve", "flat"}:
         errors.append("path mode must be preserve or flat")
+
+    if str(config.get("repository_mode") or "") not in REPOSITORY_MODES:
+        errors.append("repository mode must be new or existing")
 
     sources = normalize_sources(config.get("sources", []))
     if require_sources and not sources:

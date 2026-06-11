@@ -162,12 +162,19 @@ def _repository_password_mismatch_error(config: dict[str, Any]) -> BackupError:
     )
 
 
-def ensure_repository(config: dict[str, Any], logger: RunLogger) -> None:
+def ensure_repository(config: dict[str, Any], logger: RunLogger, *, create: bool = True) -> None:
     probe = run_restic(config, ["snapshots", "--json"], logger=logger, check=False)
     if probe.returncode == 0:
         return
     if _repository_password_mismatch(probe.output):
         raise _repository_password_mismatch_error(config)
+    if not create:
+        raise BackupError(
+            "Reconnect existing backups was selected, but MacUp could not open a Restic repository at "
+            f"{repository(config)}. Confirm the OneDrive account, repository path, and original Restic password. "
+            "To create a brand new backup set instead, choose Start new backup set. "
+            f"Probe output: {probe.output[-1000:]}"
+        )
     logger.write("Repository probe failed; trying restic init.")
     init = run_restic(config, ["init"], logger=logger, check=False)
     if init.returncode != 0:

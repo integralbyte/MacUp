@@ -39,12 +39,13 @@ cd MacUp
 
 In the manager:
 
-1. Add source folders.
-2. Set the Restic repository password. Store this password somewhere safe too; without it, Restic backups cannot be recovered.
+1. Choose whether to start a new backup set or reconnect existing OneDrive backups.
+2. Set the Restic repository password. Use the original password when reconnecting existing backups. Store this password somewhere safe too; without it, Restic backups cannot be recovered.
 3. Configure OneDrive through rclone.
-4. Initialize the repository.
-5. Install the scheduler and Xbar plugin.
-6. Run a manual backup.
+4. Add source folders.
+5. Initialize the new repository or connect the existing one.
+6. Install the scheduler and Xbar plugin.
+7. Run a manual backup.
 
 After a reset, run `./macup manager` or double-click `Install MacUp.command` again. MacUp will start from the onboarding flow because local settings and Keychain secrets have been removed.
 

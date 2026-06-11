@@ -92,6 +92,14 @@ class BackupPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, "change the repository path"):
                 ensure_repository(cfg, Mock())
 
+    def test_ensure_repository_existing_mode_probe_only(self):
+        cfg = default_config()
+        probe = CommandResult(args=["restic", "snapshots"], returncode=1, output="repository does not exist")
+        with patch("macup_tool.backup.run_restic", return_value=probe) as run_restic:
+            with self.assertRaisesRegex(BackupError, "Reconnect existing backups"):
+                ensure_repository(cfg, Mock(), create=False)
+        run_restic.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

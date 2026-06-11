@@ -196,6 +196,89 @@ def repository_remote_path(config: dict[str, Any], subpath: str = "") -> str:
     return f"{remote}:{combined}" if combined else f"{remote}:"
 
 
+def remote_path(config: dict[str, Any], subpath: str = "") -> str:
+    remote = str(config.get("remote_name") or "macup-onedrive").strip()
+    path = normalize_repository_subpath(subpath)
+    return f"{remote}:{path}" if path else f"{remote}:"
+
+
+def _list_remote(config: dict[str, Any], subpath: str) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        [rclone_bin(), "--config", str(rclone_config_path(config)), "lsjson", remote_path(config, subpath)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=rclone_env(config),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout.strip() or f"Could not list OneDrive path {subpath or '/'}")
+    try:
+        raw = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Could not parse rclone folder listing.") from exc
+    if not isinstance(raw, list):
+        raise RuntimeError("Unexpected rclone folder listing.")
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _join_remote_subpath(parent: str, child: str) -> str:
+    return "/".join(part.strip("/") for part in (parent, child) if str(part or "").strip("/"))
+
+
+def _looks_like_restic_repository(items: list[dict[str, Any]]) -> bool:
+    names = {str(item.get("Name") or item.get("Path") or "") for item in items}
+    dirs = {str(item.get("Name") or item.get("Path") or "") for item in items if item.get("IsDir")}
+    return "config" in names and {"data", "index", "keys", "snapshots"}.issubset(dirs)
+
+
+def is_restic_repository_path(config: dict[str, Any], subpath: str) -> bool:
+    ensure_encrypted_config(config)
+    path = normalize_repository_subpath(subpath)
+    if not path:
+        return False
+    try:
+        return _looks_like_restic_repository(_list_remote(config, path))
+    except Exception:
+        return False
+
+
+def discover_repositories(config: dict[str, Any], root: str = "MacUp", max_depth: int = 3) -> list[dict[str, str]]:
+    ensure_encrypted_config(config)
+    start = normalize_repository_subpath(root or "MacUp")
+    candidates: list[dict[str, str]] = []
+    visited: set[str] = set()
+
+    def scan(path: str, depth: int) -> None:
+        if path in visited or depth > max_depth:
+            return
+        visited.add(path)
+        try:
+            items = _list_remote(config, path)
+        except Exception:
+            return
+        if _looks_like_restic_repository(items):
+            candidates.append(
+                {
+                    "path": path,
+                    "repository": f"rclone:{str(config.get('remote_name') or 'macup-onedrive').strip()}:{path}",
+                    "label": path,
+                }
+            )
+            return
+        for item in items:
+            if not item.get("IsDir"):
+                continue
+            name = str(item.get("Name") or item.get("Path") or "").strip("/")
+            if not name:
+                continue
+            scan(_join_remote_subpath(path, name), depth + 1)
+
+    scan(start, 0)
+    candidates.sort(key=lambda item: item["path"].lower())
+    return candidates
+
+
 def _repository_path_parts(config: dict[str, Any], subpath: str = "") -> list[str]:
     repo_path = str(config.get("repository_path") or "").strip().strip("/")
     extra = normalize_repository_subpath(subpath)

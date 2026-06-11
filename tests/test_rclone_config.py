@@ -23,6 +23,65 @@ class RcloneConfigTests(unittest.TestCase):
             "remote:MacUp/host/restic/snapshots",
         )
 
+    def test_discover_repositories_finds_restic_markers_under_macup(self):
+        cfg = default_config()
+        cfg["remote_name"] = "remote"
+
+        def list_remote(_config, path):
+            return {
+                "MacUp": [
+                    {"Name": "host-a", "IsDir": True},
+                    {"Name": "not-a-repo", "IsDir": True},
+                ],
+                "MacUp/host-a": [
+                    {"Name": "restic", "IsDir": True},
+                    {"Name": "notes", "IsDir": True},
+                ],
+                "MacUp/host-a/restic": [
+                    {"Name": "config", "IsDir": False},
+                    {"Name": "data", "IsDir": True},
+                    {"Name": "index", "IsDir": True},
+                    {"Name": "keys", "IsDir": True},
+                    {"Name": "snapshots", "IsDir": True},
+                ],
+                "MacUp/host-a/notes": [
+                    {"Name": "config", "IsDir": False},
+                ],
+                "MacUp/not-a-repo": [
+                    {"Name": "documents", "IsDir": True},
+                ],
+                "MacUp/not-a-repo/documents": [],
+            }[path]
+
+        with patch("macup_tool.rclone_config.ensure_encrypted_config"), patch(
+            "macup_tool.rclone_config._list_remote", side_effect=list_remote
+        ):
+            repos = rclone_config.discover_repositories(cfg)
+
+        self.assertEqual([repo["path"] for repo in repos], ["MacUp/host-a/restic"])
+        self.assertEqual(repos[0]["repository"], "rclone:remote:MacUp/host-a/restic")
+
+    def test_is_restic_repository_path_checks_required_markers(self):
+        cfg = default_config()
+        restic_items = [
+            {"Name": "config", "IsDir": False},
+            {"Name": "data", "IsDir": True},
+            {"Name": "index", "IsDir": True},
+            {"Name": "keys", "IsDir": True},
+            {"Name": "snapshots", "IsDir": True},
+        ]
+        partial_items = [{"Name": "config", "IsDir": False}, {"Name": "data", "IsDir": True}]
+
+        with patch("macup_tool.rclone_config.ensure_encrypted_config"), patch(
+            "macup_tool.rclone_config._list_remote", return_value=restic_items
+        ):
+            self.assertTrue(rclone_config.is_restic_repository_path(cfg, "MacUp/host/restic"))
+
+        with patch("macup_tool.rclone_config.ensure_encrypted_config"), patch(
+            "macup_tool.rclone_config._list_remote", return_value=partial_items
+        ):
+            self.assertFalse(rclone_config.is_restic_repository_path(cfg, "MacUp/host/restic"))
+
     def test_list_repository_returns_safe_item_shape(self):
         cfg = default_config()
         cfg["remote_name"] = "remote"

@@ -12,6 +12,7 @@ class ConfigTests(unittest.TestCase):
     def test_default_config_is_valid_without_sources(self):
         cfg = default_config()
         self.assertEqual(validate_config(cfg, require_sources=False), [])
+        self.assertFalse(cfg["repository_selected"])
 
     def test_fresh_repository_path_uses_new_restic_folder(self):
         path = fresh_repository_path()

@@ -80,19 +80,21 @@ def _install_ready() -> bool:
 
 def _setup_state(config: dict[str, Any], restic_password_set: bool) -> dict[str, Any]:
     repository_mode_ready = str(config.get("repository_mode") or "") in {"new", "existing"} or bool(config.get("initialized"))
+    repository_selected = str(config.get("repository_mode") or "") != "existing" or bool(config.get("repository_selected")) or bool(config.get("initialized"))
     onedrive_ready = bool(config.get("rclone_configured")) or rclone_config.remote_exists(config)
     sources_ready = bool(normalize_sources(config.get("sources", [])))
     repository_ready = bool(config.get("initialized"))
     installed = _install_ready()
     return {
         "repository_mode": repository_mode_ready,
+        "repository_selected": repository_selected,
         "restic_password": restic_password_set,
         "onedrive": onedrive_ready,
         "sources": sources_ready,
         "repository": repository_ready,
         "installed": installed,
         "xbar_running": is_xbar_running(),
-        "complete": repository_mode_ready and restic_password_set and onedrive_ready and sources_ready and repository_ready and installed,
+        "complete": repository_mode_ready and repository_selected and restic_password_set and onedrive_ready and sources_ready and repository_ready and installed,
     }
 
 
@@ -330,6 +332,12 @@ class ManagerHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 400)
             return
+        if parsed.path == "/api/repositories/discover":
+            try:
+                self._send_json({"ok": True, "repositories": rclone_config.discover_repositories(load_config())})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
         self._send_json({"ok": False, "error": "Not found"}, 404)
 
     def do_POST(self) -> None:
@@ -368,8 +376,23 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 cfg = load_config()
                 cfg["repository_mode"] = mode
                 cfg["initialized"] = False
+                cfg["repository_selected"] = mode == "new"
                 if mode == "new":
                     cfg["repository_path"] = fresh_repository_path()
+                saved = save_config(cfg)
+                self._send_json({"ok": True, "config": saved})
+                return
+            if parsed.path == "/api/repository/select":
+                repo_path = rclone_config.normalize_repository_subpath(str(body.get("path") or ""))
+                if not repo_path:
+                    raise ValueError("Repository path is required.")
+                cfg = load_config()
+                if not rclone_config.is_restic_repository_path(cfg, repo_path):
+                    raise ValueError("That OneDrive folder does not look like a Restic repository.")
+                cfg["repository_mode"] = "existing"
+                cfg["repository_path"] = repo_path
+                cfg["repository_selected"] = True
+                cfg["initialized"] = False
                 saved = save_config(cfg)
                 self._send_json({"ok": True, "config": saved})
                 return
@@ -682,6 +705,17 @@ def manager_html(token: str) -> str:
       <div id="rcloneQuestion" style="margin-top:12px"></div>
     </section>
 
+    <section id="repositoryPickerSection" data-normal>
+      <h2>Existing Repositories</h2>
+      <p class="muted">MacUp scans the connected OneDrive account for Restic repositories under the MacUp folder. This does not need the Restic password.</p>
+      <div class="actions" style="margin-bottom:12px"><button id="discoverRepositories">Find Repositories</button></div>
+      <div id="repositoryCandidates" class="snapshot-list muted">No repositories loaded.</div>
+      <div class="grid" style="margin-top:12px">
+        <label>Manual OneDrive repository path<input id="manual_repository_path" placeholder="MacUp/your-mac/restic"></label>
+      </div>
+      <div class="actions" style="margin-top:12px"><button id="selectManualRepository">Use Manual Path</button></div>
+    </section>
+
     <section id="snapshotsSection" data-normal>
       <h2>Snapshots</h2>
       <p class="muted">Details appear under each snapshot. Restore size is calculated from Restic metadata; on OneDrive it can be slow, but it does not restore the snapshot contents.</p>
@@ -735,6 +769,7 @@ def manager_html(token: str) -> str:
     let pollTimer = null;
     let restorePollTimer = null;
     let snapshotsLoaded = false;
+    let repositoriesLoaded = false;
     const resetConfirmationText = {json.dumps(CONFIRMATION_TEXT)};
     const out = document.getElementById('output');
     const liveLog = document.getElementById('liveLog');
@@ -789,37 +824,71 @@ def manager_html(token: str) -> str:
     }}
     function currentSetupStep(data) {{
       const setup = data.setup || {{}};
+      const mode = data.config.repository_mode || '';
       if (!setup.repository_mode) return {{
-        title: 'Step 1 of 6: Choose backup set',
+        title: 'Step 1: Choose backup set',
         text: 'Start a new encrypted backup set, or reconnect to backups that already exist in OneDrive.',
         sections: [],
         modeChoice: true
       }};
-      if (!setup.restic_password) return {{
-        title: 'Step 2 of 6: Save the encryption password',
-        text: data.config.repository_mode === 'existing' ? 'Enter the original Restic password for the existing OneDrive backups.' : 'Choose a new Restic password for this new backup set. Store it somewhere safe.',
-        sections: ['secretsSection']
-      }};
-      if (!setup.onedrive) return {{
-        title: 'Step 3 of 6: Connect OneDrive',
-        text: 'Configure OneDrive in the browser, then choose the drive rclone should use.',
-        sections: ['onedriveSection']
-      }};
-      if (!setup.sources) return {{
-        title: 'Step 4 of 6: Choose folders',
-        text: 'Add the folders that should be backed up, then save them.',
-        sections: ['sourceSection']
-      }};
-      if (!setup.repository) return {{
-        title: 'Step 5 of 6: Connect repository',
-        text: data.config.repository_mode === 'existing' ? 'Confirm the existing repository path, then connect it with the original Restic password.' : 'MacUp picked a fresh repository path for the new backup set. Confirm it, then initialize.',
-        sections: data.config.repository_mode === 'existing' ? ['secretsSection', 'backupRulesSection', 'advancedSection'] : ['backupRulesSection', 'advancedSection']
-      }};
-      if (!setup.installed) return {{
-        title: 'Step 6 of 6: Install scheduling and Xbar',
-        text: 'Install the LaunchAgent scheduler and Xbar menu item so backups and status keep working.',
-        sections: ['advancedSection']
-      }};
+      if (mode === 'existing') {{
+        if (!setup.onedrive) return {{
+          title: 'Step 2: Connect OneDrive',
+          text: 'Sign into the same OneDrive account that contains the old MacUp Restic repository.',
+          sections: ['onedriveSection']
+        }};
+        if (!setup.repository_selected) return {{
+          title: 'Step 3: Choose existing repository',
+          text: 'Find Restic repositories in OneDrive, then select the backup set you want to reconnect.',
+          sections: ['repositoryPickerSection']
+        }};
+        if (!setup.restic_password) return {{
+          title: 'Step 4: Enter original password',
+          text: 'Enter the Restic password that was used for this existing repository. A new password cannot unlock old backups.',
+          sections: ['secretsSection']
+        }};
+        if (!setup.repository) return {{
+          title: 'Step 5: Verify repository',
+          text: 'MacUp will open the selected repository with the original password. It will not create a new repository in reconnect mode.',
+          sections: ['backupRulesSection', 'advancedSection']
+        }};
+        if (!setup.sources) return {{
+          title: 'Step 6: Choose folders for future backups',
+          text: 'Add the folders that should be backed up from now on, then save them.',
+          sections: ['sourceSection']
+        }};
+        if (!setup.installed) return {{
+          title: 'Step 7: Install scheduling and Xbar',
+          text: 'Install the LaunchAgent scheduler and Xbar menu item so backups and status keep working.',
+          sections: ['advancedSection']
+        }};
+      }} else {{
+        if (!setup.restic_password) return {{
+          title: 'Step 2: Save the encryption password',
+          text: 'Choose a new Restic password for this new backup set. Store it somewhere safe.',
+          sections: ['secretsSection']
+        }};
+        if (!setup.onedrive) return {{
+          title: 'Step 3: Connect OneDrive',
+          text: 'Configure OneDrive in the browser, then choose the drive rclone should use.',
+          sections: ['onedriveSection']
+        }};
+        if (!setup.sources) return {{
+          title: 'Step 4: Choose folders',
+          text: 'Add the folders that should be backed up, then save them.',
+          sections: ['sourceSection']
+        }};
+        if (!setup.repository) return {{
+          title: 'Step 5: Initialize repository',
+          text: 'MacUp picked a fresh repository path for the new backup set. Confirm it, then initialize.',
+          sections: ['backupRulesSection', 'advancedSection']
+        }};
+        if (!setup.installed) return {{
+          title: 'Step 6: Install scheduling and Xbar',
+          text: 'Install the LaunchAgent scheduler and Xbar menu item so backups and status keep working.',
+          sections: ['advancedSection']
+        }};
+      }}
       return {{
         title: 'Setup complete',
         text: 'MacUp is ready.',
@@ -895,6 +964,57 @@ def manager_html(token: str) -> str:
         box.append(row);
       }});
     }}
+    function renderRepositoryCandidates(items) {{
+      const box = document.getElementById('repositoryCandidates');
+      box.innerHTML = '';
+      const repositories = Array.isArray(items) ? items : [];
+      box.classList.toggle('muted', !repositories.length);
+      if (!repositories.length) {{
+        box.textContent = 'No MacUp Restic repositories found in the connected OneDrive account.';
+        return;
+      }}
+      repositories.forEach(repo => {{
+        const card = document.createElement('div');
+        card.className = 'snapshot-card';
+        const main = document.createElement('div');
+        main.className = 'snapshot-main';
+        const title = document.createElement('div');
+        title.className = 'snapshot-title';
+        title.innerHTML = '<strong>' + escapeHtml(repo.path || 'Unknown path') + '</strong><span class="muted">' + escapeHtml(repo.repository || '') + '</span>';
+        const actions = document.createElement('div');
+        actions.className = 'snapshot-actions';
+        const use = document.createElement('button');
+        use.className = 'primary';
+        use.textContent = 'Use This Repository';
+        use.onclick = () => runAction(async () => selectRepository(repo.path || ''), use);
+        actions.append(use);
+        main.append(title, actions);
+        card.append(main);
+        box.append(card);
+      }});
+    }}
+    async function loadRepositoryCandidates() {{
+      const box = document.getElementById('repositoryCandidates');
+      box.classList.add('muted');
+      box.textContent = 'Searching OneDrive for Restic repositories...';
+      try {{
+        const data = await api('/api/repositories/discover');
+        repositoriesLoaded = true;
+        renderRepositoryCandidates(data.repositories || []);
+      }} catch (err) {{
+        repositoriesLoaded = false;
+        box.classList.add('muted');
+        box.textContent = 'Repository discovery failed: ' + (err && err.message ? err.message : String(err));
+        throw err;
+      }}
+    }}
+    async function selectRepository(path) {{
+      if (!path) throw new Error('Repository path is missing.');
+      await api('/api/repository/select', {{method:'POST', body:{{path}}}});
+      repositoriesLoaded = false;
+      await refresh();
+      log('Selected existing repository: ' + path + '\\nNext, enter the original Restic password for that repository.');
+    }}
     function renderRepositoryWarning(data) {{
       const warning = document.getElementById('repositoryWarning');
       const messages = [];
@@ -940,6 +1060,7 @@ def manager_html(token: str) -> str:
       ['backup_interval_hours','retention_count','log_retention_days','path_mode','remote_name','repository_path','upload_limit'].forEach(id => {{
         document.getElementById(id).value = cfg[id] || '';
       }});
+      document.getElementById('manual_repository_path').value = cfg.repository_path || '';
       document.getElementById('dot').style.background = data.summary.color;
       document.getElementById('statusText').textContent = data.summary.label + ' - last backup: ' + data.summary.last_backup_relative;
       document.getElementById('passwordState').textContent = data.restic_password_set ? 'Stored in Keychain' : 'Not stored';
@@ -956,6 +1077,9 @@ def manager_html(token: str) -> str:
       renderRestoreStatus(data.restore);
       renderSetup(data);
       syncSnapshotDownloadButtons();
+      if (data.setup && !data.setup.complete && cfg.repository_mode === 'existing' && data.setup.onedrive && !data.setup.repository_selected && !repositoriesLoaded) {{
+        loadRepositoryCandidates().catch(err => log('Repository discovery failed: ' + err.message));
+      }}
       if (data.restore && data.restore.state === 'running') startRestorePolling();
     }}
     async function refreshLog() {{
@@ -1016,7 +1140,8 @@ def manager_html(token: str) -> str:
         if (mode === 'new') {{
           log('New backup set selected. MacUp chose a fresh repository path: ' + data.config.repository_path);
         }} else {{
-          log('Reconnect existing backups selected. Use the existing OneDrive path and original Restic password.');
+          repositoriesLoaded = false;
+          log('Reconnect existing backups selected. Connect OneDrive, then MacUp will find repositories you can choose from.');
         }}
       }}, button);
     }}
@@ -1236,6 +1361,14 @@ def manager_html(token: str) -> str:
     }}, event.currentTarget);
     document.getElementById('chooseNewRepository').onclick = event => chooseRepositoryMode('new', event.currentTarget);
     document.getElementById('chooseExistingRepository').onclick = event => chooseRepositoryMode('existing', event.currentTarget);
+    document.getElementById('discoverRepositories').onclick = event => runAction(async () => {{
+      repositoriesLoaded = false;
+      await loadRepositoryCandidates();
+      log('Repository search complete.');
+    }}, event.currentTarget);
+    document.getElementById('selectManualRepository').onclick = event => runAction(async () => {{
+      await selectRepository(document.getElementById('manual_repository_path').value);
+    }}, event.currentTarget);
     document.getElementById('saveSources').onclick = event => runAction(save, event.currentTarget);
     document.getElementById('saveConfig').onclick = event => runAction(save, event.currentTarget);
     document.getElementById('savePassword').onclick = event => runAction(async () => {{

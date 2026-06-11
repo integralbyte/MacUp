@@ -42,7 +42,13 @@ class ManagerUiTests(unittest.TestCase):
         self.assertIn("/api/repository/mode", html)
         self.assertIn("Initialize New Repository", html)
         self.assertIn("Connect Existing Repository", html)
-        self.assertIn("['secretsSection', 'backupRulesSection', 'advancedSection']", html)
+        self.assertIn("Existing Repositories", html)
+        self.assertIn("/api/repositories/discover", html)
+        self.assertIn("/api/repository/select", html)
+        self.assertIn("Use This Repository", html)
+        self.assertIn("Manual OneDrive repository path", html)
+        self.assertIn("selectManualRepository", html)
+        self.assertIn("!setup.repository_selected", html)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ def default_config() -> dict[str, Any]:
         "repository_path": f"MacUp/{hostname}/restic",
         "repository": "",
         "repository_history": [],
+        "repository_selected": False,
         "rclone_config_path": str(paths.default_rclone_config_path()),
         "rclone_configured": False,
         "upload_limit": "",

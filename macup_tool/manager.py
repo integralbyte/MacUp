@@ -698,6 +698,12 @@ def manager_html(token: str) -> str:
       </div>
     </section>
 
+    <section id="backupIssuesSection" class="hidden" data-normal>
+      <h2>Backup Warnings</h2>
+      <div id="backupWarning" class="warning"></div>
+      <div id="backupIssues" class="snapshot-list"></div>
+    </section>
+
     <section id="activitySection" data-normal>
       <h2>Backup Activity</h2>
       <div class="grid">
@@ -1164,6 +1170,32 @@ def manager_html(token: str) -> str:
       document.getElementById('backupProgressText').textContent = parts.join(' - ');
       document.getElementById('backupProgress').value = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
     }}
+    function renderBackupIssues(summary) {{
+      const issues = Array.isArray(summary.backup_issues) ? summary.backup_issues : [];
+      const warning = summary.last_warning || '';
+      setVisible('backupIssuesSection', Boolean(warning || issues.length));
+      if (!warning && !issues.length) return;
+      document.getElementById('backupWarning').textContent = warning || 'Backup completed with warnings.';
+      const box = document.getElementById('backupIssues');
+      box.innerHTML = '';
+      issues.slice(0, 25).forEach(issue => {{
+        const row = document.createElement('div');
+        row.className = 'snapshot-card';
+        const item = document.createElement('strong');
+        item.textContent = issue.item || 'Unknown item';
+        const detail = document.createElement('span');
+        detail.className = 'muted';
+        detail.textContent = (issue.during ? issue.during + ': ' : '') + (issue.message || 'Could not be read');
+        row.append(item, detail);
+        box.append(row);
+      }});
+      if (issues.length > 25) {{
+        const more = document.createElement('div');
+        more.className = 'muted';
+        more.textContent = String(issues.length - 25) + ' more warning items are in the latest log.';
+        box.append(more);
+      }}
+    }}
     function render(data) {{
       cfg = data.config;
       lastStatus = data.summary;
@@ -1193,6 +1225,7 @@ def manager_html(token: str) -> str:
       renderRestoreStatus(data.restore);
       renderSetup(data);
       renderActivity(data);
+      renderBackupIssues(data.summary || {{}});
       syncSnapshotDownloadButtons();
       if (data.setup && !data.setup.complete && cfg.repository_mode === 'existing' && data.setup.onedrive && !data.setup.repository_selected && !repositoriesLoaded) {{
         loadRepositoryCandidates().catch(err => log('Repository discovery failed: ' + err.message));

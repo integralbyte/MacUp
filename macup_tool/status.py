@@ -26,6 +26,8 @@ def default_status() -> dict[str, Any]:
         "last_success_at": "",
         "last_finished_at": "",
         "last_error": "",
+        "last_warning": "",
+        "backup_issues": [],
         "active_run_id": "",
         "latest_log": "",
         "progress_phase": "",
@@ -75,6 +77,8 @@ def mark_running(run_id: str, log_path: Path) -> dict[str, Any]:
             "active_run_id": run_id,
             "latest_log": str(log_path),
             "last_error": "",
+            "last_warning": "",
+            "backup_issues": [],
             "progress_phase": "starting",
             "progress_message": "Starting backup",
             "progress_percent": 0,
@@ -133,7 +137,13 @@ def mark_backup_progress(
     return save_status(status)
 
 
-def mark_success(run_id: str, log_path: Path) -> dict[str, Any]:
+def mark_success(
+    run_id: str,
+    log_path: Path,
+    *,
+    warning: str = "",
+    issues: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     status = load_status()
     now = iso()
     status.update(
@@ -145,8 +155,10 @@ def mark_success(run_id: str, log_path: Path) -> dict[str, Any]:
             "active_run_id": "",
             "latest_log": str(log_path),
             "last_error": "",
+            "last_warning": warning[:1000],
+            "backup_issues": list(issues or [])[:200],
             "progress_phase": "complete",
-            "progress_message": "Backup complete",
+            "progress_message": "Backup complete" + (" with warnings" if warning else ""),
             "progress_percent": 100,
             "progress_updated_at": now,
         }
@@ -164,6 +176,7 @@ def mark_failed(run_id: str, log_path: Path, error: str) -> dict[str, Any]:
             "active_run_id": "",
             "latest_log": str(log_path),
             "last_error": error[:1000],
+            "last_warning": "",
             "progress_phase": "failed",
             "progress_message": "Backup failed",
             "progress_updated_at": iso(),
@@ -183,6 +196,7 @@ def mark_stopped(run_id: str = "", log_path: Path | None = None, message: str = 
             "active_run_id": "",
             "latest_log": latest_log,
             "last_error": message[:1000],
+            "last_warning": "",
             "progress_phase": "cancelled",
             "progress_message": "Backup stopped",
             "progress_updated_at": iso(),
@@ -247,6 +261,8 @@ def summarize(config: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
         "latest_log": status.get("latest_log") or "",
         "source_count": len(normalize_sources(config.get("sources", []))),
         "last_error": status.get("last_error") or "",
+        "last_warning": status.get("last_warning") or "",
+        "backup_issues": status.get("backup_issues") if isinstance(status.get("backup_issues"), list) else [],
         "last_result": status.get("last_result") or "none",
         "progress_phase": status.get("progress_phase") or "",
         "progress_message": status.get("progress_message") or "",
@@ -393,6 +409,9 @@ def xbar_output(config: dict[str, Any], status: dict[str, Any], cli: str | None 
     if summary["last_error"]:
         safe_error = summary["last_error"].replace("|", "/").replace("\n", " ")[:70]
         lines.append(f"Last error: {safe_error} | color={RED} disabled=true")
+    if summary["last_warning"]:
+        safe_warning = summary["last_warning"].replace("|", "/").replace("\n", " ")[:70]
+        lines.append(f"Warning: {safe_warning} | color={ORANGE} disabled=true")
     if log_path:
         lines.append(
             f"Latest Log | shell=/usr/bin/open param1={_xbar_quote(log_path)} terminal=false"
@@ -445,6 +464,8 @@ def text_output(config: dict[str, Any], status: dict[str, Any]) -> str:
         lines.append(f"Latest log: {summary['latest_log']}")
     if summary["last_error"]:
         lines.append(f"Last error: {summary['last_error']}")
+    if summary["last_warning"]:
+        lines.append(f"Last warning: {summary['last_warning']}")
     return "\n".join(lines) + "\n"
 
 

@@ -80,6 +80,21 @@ class StatusTests(unittest.TestCase):
         self.assertIn("Stop Backup", output)
         self.assertIn("param1=backup param2=--stop", output)
 
+    def test_xbar_shows_backup_warning_without_turning_red(self):
+        cfg = default_config()
+        cfg["initialized"] = True
+        status = default_status()
+        status["last_result"] = "success"
+        status["last_success_at"] = iso(utc_now() - timedelta(hours=1))
+        status["last_warning"] = "Backup completed, but /Users/ace/Pictures/Photos Library.photoslibrary was skipped."
+        with patch("macup_tool.status.manager_state.probe", return_value={"running": False}), patch(
+            "macup_tool.status.load_restore_status_for_xbar", return_value={"state": "idle"}
+        ):
+            output = xbar_output(cfg, status, "/tmp/macup")
+        self.assertTrue(output.startswith("● | color=#2da44e"))
+        self.assertIn("Warning: Backup completed", output)
+        self.assertNotIn("Last error:", output)
+
     def test_xbar_shows_restore_progress_without_changing_green_icon(self):
         cfg = default_config()
         cfg["initialized"] = True

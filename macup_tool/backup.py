@@ -309,7 +309,9 @@ def prune_snapshots(config: dict[str, Any], logger: RunLogger) -> None:
     if not ids:
         logger.write("No old MacUp snapshots to prune.")
         return
-    run_restic(config, ["forget"] + ids + ["--prune"], logger=logger, check=True)
+    result = run_restic(config, ["forget"] + ids + ["--prune"], logger=logger, check=False)
+    if result.returncode != 0:
+        logger.write("Snapshot pruning failed and will be retried after a future backup.")
 
 
 def cleanup_failed_run(config: dict[str, Any], run_tag: str, logger: RunLogger) -> None:
@@ -318,12 +320,73 @@ def cleanup_failed_run(config: dict[str, Any], run_tag: str, logger: RunLogger) 
         logger.write("Failed-run snapshot cleanup did not complete.")
 
 
-def _backup_progress_from_json(line: str) -> dict[str, Any] | None:
+def _restic_json_line(line: str) -> dict[str, Any] | None:
     try:
         data = json.loads(line)
     except json.JSONDecodeError:
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _backup_issue_from_json(data: dict[str, Any]) -> dict[str, Any] | None:
+    if data.get("message_type") != "error":
+        return None
+    error = data.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "")
+    else:
+        message = str(error or data.get("message") or "")
+    item = str(data.get("item") or "")
+    during = str(data.get("during") or "")
+    if not item and not message:
+        return None
+    return {"item": item, "during": during, "message": message}
+
+
+def _warning_summary(issues: list[dict[str, Any]]) -> str:
+    if not issues:
+        return "Backup completed, but Restic reported unreadable source files."
+    count = len(issues)
+    first = issues[0]
+    item = str(first.get("item") or "a source item")
+    message = str(first.get("message") or "could not be read")
+    if count == 1:
+        return f"Backup completed, but {item} was skipped: {message}"
+    return f"Backup completed, but {count} source items were skipped. First: {item}: {message}"
+
+
+def _command_saved_snapshot_with_read_warnings(
+    exc: CommandError,
+    summaries: list[dict[str, Any]],
+    exit_errors: list[dict[str, Any]],
+) -> bool:
+    if exc.result.returncode != 3:
+        return False
+    saved_snapshot = any(summary.get("snapshot_id") for summary in summaries)
+    if not saved_snapshot:
+        return False
+    if not exit_errors:
+        return True
+    return any("could not be read" in str(error.get("message") or "").lower() for error in exit_errors)
+
+
+def _friendly_command_error(exc: CommandError) -> str:
+    for line in reversed(exc.result.output.splitlines()):
+        data = _restic_json_line(line)
+        if data and data.get("message_type") == "exit_error":
+            message = str(data.get("message") or "").strip()
+            if message:
+                return message
+    for line in reversed(exc.result.output.splitlines()):
+        text = line.strip()
+        if text:
+            return text[:1000]
+    return str(exc)
+
+
+def _backup_progress_from_json(line: str) -> dict[str, Any] | None:
+    data = _restic_json_line(line)
+    if data is None:
         return None
     message_type = data.get("message_type")
     if message_type == "status":
@@ -384,6 +447,8 @@ def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool =
                 ensure_repository(config, logger)
                 commands = build_backup_commands(config, run_tag)
                 command_count = len(commands)
+                backup_issues: list[dict[str, Any]] = []
+                seen_backup_issues: set[tuple[str, str]] = set()
                 for index, command in enumerate(commands, start=1):
                     mark_backup_progress(
                         run_id_value,
@@ -393,8 +458,22 @@ def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool =
                         current=index,
                         total=command_count,
                     )
+                    command_summaries: list[dict[str, Any]] = []
+                    command_exit_errors: list[dict[str, Any]] = []
 
                     def on_line(line: str, current=index) -> None:
+                        data = _restic_json_line(line)
+                        if data:
+                            if data.get("message_type") == "summary":
+                                command_summaries.append(data)
+                            elif data.get("message_type") == "exit_error":
+                                command_exit_errors.append(data)
+                            issue = _backup_issue_from_json(data)
+                            if issue:
+                                issue_key = (str(issue.get("item") or ""), str(issue.get("message") or ""))
+                                if issue_key not in seen_backup_issues:
+                                    seen_backup_issues.add(issue_key)
+                                    backup_issues.append(issue)
                         progress = _backup_progress_from_json(line)
                         if not progress:
                             return
@@ -406,26 +485,38 @@ def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool =
                             **progress,
                         )
 
-                    run_streamed(
-                        command.args,
-                        cwd=command.cwd,
-                        env=restic_env(config),
-                        logger=logger,
-                        check=True,
-                        on_line=on_line,
-                    )
+                    try:
+                        run_streamed(
+                            command.args,
+                            cwd=command.cwd,
+                            env=restic_env(config),
+                            logger=logger,
+                            check=True,
+                            on_line=on_line,
+                        )
+                    except CommandError as exc:
+                        if _command_saved_snapshot_with_read_warnings(exc, command_summaries, command_exit_errors):
+                            warning = _warning_summary(backup_issues)
+                            logger.write(warning)
+                            continue
+                        raise BackupError(_friendly_command_error(exc)) from exc
                 mark_backup_progress(run_id_value, logger.path, phase="pruning", message="Pruning old snapshots")
                 prune_snapshots(config, logger)
             except Exception as exc:
-                logger.write(f"Backup failed: {exc}")
+                message = _friendly_command_error(exc) if isinstance(exc, CommandError) else str(exc)
+                logger.write(f"Backup failed: {message}")
                 try:
                     cleanup_failed_run(config, run_tag, logger)
                 except Exception as cleanup_exc:
                     logger.write(f"Failed-run cleanup error: {cleanup_exc}")
-                mark_failed(run_id_value, logger.path, str(exc))
+                mark_failed(run_id_value, logger.path, message)
                 raise
-            mark_success(run_id_value, logger.path)
-            logger.write(f"Backup run {run_id_value} completed successfully.")
+            warning = _warning_summary(backup_issues) if backup_issues else ""
+            mark_success(run_id_value, logger.path, warning=warning, issues=backup_issues)
+            if warning:
+                logger.write(f"Backup run {run_id_value} completed with warnings.")
+            else:
+                logger.write(f"Backup run {run_id_value} completed successfully.")
     return 0
 
 

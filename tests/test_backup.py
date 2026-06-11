@@ -4,10 +4,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from macup_tool.backup import BackupError, BackupLock, build_backup_commands, ensure_repository, snapshot_ids_to_forget, stop_backup
+from macup_tool.backup import (
+    BackupCommand,
+    BackupError,
+    BackupLock,
+    build_backup_commands,
+    ensure_repository,
+    run_backup,
+    snapshot_ids_to_forget,
+    stop_backup,
+)
 from macup_tool.config import default_config
 from macup_tool.logutil import prune_logs
-from macup_tool.process import CommandResult
+from macup_tool.process import CommandError, CommandResult
 
 
 class BackupPlanningTests(unittest.TestCase):
@@ -115,6 +124,68 @@ class BackupPlanningTests(unittest.TestCase):
             with self.assertRaisesRegex(BackupError, "Reconnect existing backups"):
                 ensure_repository(cfg, Mock(), create=False)
         run_restic.assert_called_once()
+
+    def test_run_backup_treats_saved_snapshot_with_unreadable_files_as_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            cfg = default_config()
+            cfg["repository"] = str(root / "repo")
+            cfg["sources"] = [str(source)]
+            cfg["initialized"] = True
+            lines = [
+                '{"message_type":"error","error":{"message":"openfile for readdirnames failed: operation not permitted"},"during":"scan","item":"/Users/ace/Pictures/Photos Library.photoslibrary"}',
+                '{"message_type":"summary","total_files_processed":1,"total_bytes_processed":10,"snapshot_id":"abc123"}',
+                '{"message_type":"exit_error","code":3,"message":"Warning: at least one source file could not be read"}',
+            ]
+
+            def fake_run_streamed(args, **kwargs):
+                for line in lines:
+                    kwargs["on_line"](line)
+                raise CommandError(CommandResult(args=args, returncode=3, output="\n".join(lines)))
+
+            env = {"MACUP_STATE_DIR": str(root / "state"), "MACUP_RESTIC_PASSWORD": "test-password"}
+            with patch.dict(os.environ, env), patch("macup_tool.backup.ensure_repository"), patch(
+                "macup_tool.backup.prune_snapshots"
+            ), patch("macup_tool.backup.build_backup_commands", return_value=[BackupCommand(["restic", "backup"])]), patch(
+                "macup_tool.backup.run_streamed", side_effect=fake_run_streamed
+            ):
+                self.assertEqual(run_backup(cfg, manual=True), 0)
+                from macup_tool.status import load_status
+
+                status = load_status()
+                self.assertEqual(status["last_result"], "success")
+                self.assertIn("Photos Library", status["last_warning"])
+                self.assertEqual(status["backup_issues"][0]["during"], "scan")
+
+    def test_run_backup_fails_when_code_3_has_no_saved_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            source.mkdir()
+            cfg = default_config()
+            cfg["repository"] = str(root / "repo")
+            cfg["sources"] = [str(source)]
+            cfg["initialized"] = True
+            lines = ['{"message_type":"exit_error","code":3,"message":"Warning: at least one source file could not be read"}']
+
+            def fake_run_streamed(args, **kwargs):
+                for line in lines:
+                    kwargs["on_line"](line)
+                raise CommandError(CommandResult(args=args, returncode=3, output="\n".join(lines)))
+
+            env = {"MACUP_STATE_DIR": str(root / "state"), "MACUP_RESTIC_PASSWORD": "test-password"}
+            with patch.dict(os.environ, env), patch("macup_tool.backup.ensure_repository"), patch(
+                "macup_tool.backup.cleanup_failed_run"
+            ), patch("macup_tool.backup.build_backup_commands", return_value=[BackupCommand(["restic", "backup"])]), patch(
+                "macup_tool.backup.run_streamed", side_effect=fake_run_streamed
+            ):
+                with self.assertRaisesRegex(BackupError, "could not be read"):
+                    run_backup(cfg, manual=True)
+                from macup_tool.status import load_status
+
+                self.assertEqual(load_status()["last_result"], "failed")
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ def plist_data(cli: str | None = None) -> dict:
         "Label": LABEL,
         "ProgramArguments": [cli_path, "backup", "--due"],
         "RunAtLoad": True,
-        "StartCalendarInterval": {"Minute": 0},
+        "StartInterval": 300,
         "StandardOutPath": str(paths.logs_dir() / "launchd.out.log"),
         "StandardErrorPath": str(paths.logs_dir() / "launchd.err.log"),
         "EnvironmentVariables": {

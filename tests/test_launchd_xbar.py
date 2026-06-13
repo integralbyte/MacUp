@@ -8,11 +8,12 @@ from macup_tool import installer, launchd, xbar
 
 
 class InstallArtifactTests(unittest.TestCase):
-    def test_launchd_plist_uses_hourly_calendar_check(self):
+    def test_launchd_plist_uses_five_minute_due_check(self):
         data = launchd.plist_data("/tmp/macup")
         self.assertEqual(data["ProgramArguments"], ["/tmp/macup", "backup", "--due"])
         self.assertTrue(data["RunAtLoad"])
-        self.assertEqual(data["StartCalendarInterval"], {"Minute": 0})
+        self.assertEqual(data["StartInterval"], 300)
+        self.assertNotIn("StartCalendarInterval", data)
 
     def test_xbar_plugin_calls_status_renderer(self):
         script = xbar.plugin_script("/tmp/macup")

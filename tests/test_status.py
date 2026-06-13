@@ -24,6 +24,19 @@ class StatusTests(unittest.TestCase):
         self.assertFalse(is_stale(cfg, status))
         self.assertEqual(summarize(cfg, status)["color"], GREEN)
 
+    def test_due_allows_five_minute_early_scheduler_wakeup(self):
+        cfg = default_config()
+        status = default_status()
+        status["last_result"] = "success"
+        now = utc_now()
+
+        status["last_success_at"] = iso(now - timedelta(hours=23, minutes=56))
+        self.assertFalse(is_stale(cfg, status, now=now))
+        self.assertTrue(is_due(cfg, status, now=now))
+
+        status["last_success_at"] = iso(now - timedelta(hours=23, minutes=54))
+        self.assertFalse(is_due(cfg, status, now=now))
+
     def test_running_status_is_orange(self):
         cfg = default_config()
         cfg["initialized"] = True

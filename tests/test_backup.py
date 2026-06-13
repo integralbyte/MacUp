@@ -153,6 +153,8 @@ class BackupPlanningTests(unittest.TestCase):
                 "macup_tool.backup.prune_snapshots"
             ), patch("macup_tool.backup.build_backup_commands", return_value=[BackupCommand(["restic", "backup"])]), patch(
                 "macup_tool.backup.run_streamed", side_effect=fake_run_streamed
+            ), patch(
+                "macup_tool.backup.launchd.reload_later"
             ):
                 self.assertEqual(run_backup(cfg, manual=True), 0)
                 from macup_tool.status import load_status

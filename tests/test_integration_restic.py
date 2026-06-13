@@ -26,7 +26,7 @@ class ResticIntegrationTests(unittest.TestCase):
                 "MACUP_STATE_DIR": str(root / "state"),
                 "MACUP_RESTIC_PASSWORD": "integration-test-password",
             }
-            with patch.dict(os.environ, env):
+            with patch.dict(os.environ, env), patch("macup_tool.backup.launchd.reload_later"):
                 cfg = default_config()
                 cfg["repository"] = str(repo)
                 cfg["sources"] = [str(source)]

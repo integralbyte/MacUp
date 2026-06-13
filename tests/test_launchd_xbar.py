@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -8,12 +9,20 @@ from macup_tool import installer, launchd, xbar
 
 
 class InstallArtifactTests(unittest.TestCase):
-    def test_launchd_plist_uses_five_minute_due_check(self):
-        data = launchd.plist_data("/tmp/macup")
+    def test_launchd_plist_uses_hourly_calendar_check(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"MACUP_STATE_DIR": tmp}):
+            data = launchd.plist_data("/tmp/macup")
         self.assertEqual(data["ProgramArguments"], ["/tmp/macup", "backup", "--due"])
         self.assertTrue(data["RunAtLoad"])
-        self.assertEqual(data["StartInterval"], 300)
-        self.assertNotIn("StartCalendarInterval", data)
+        self.assertEqual(data["StartCalendarInterval"], {"Minute": 0})
+        self.assertNotIn("StartInterval", data)
+
+    def test_launchd_plist_uses_last_success_minute(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"MACUP_STATE_DIR": tmp}):
+            status_path = Path(tmp) / "status.json"
+            status_path.write_text(json.dumps({"last_success_at": "2026-06-13T19:11:59Z"}), encoding="utf-8")
+            data = launchd.plist_data("/tmp/macup")
+        self.assertEqual(data["StartCalendarInterval"], {"Minute": 11})
 
     def test_xbar_plugin_calls_status_renderer(self):
         script = xbar.plugin_script("/tmp/macup")

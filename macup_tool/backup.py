@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import keychain, paths
+from . import keychain, launchd, paths
 from .config import MACUP_TAG, RUN_TAG_PREFIX, normalize_sources, repository, rclone_config_path, upload_limit, validate_config
 from .logutil import RunLogger, prune_logs
 from .process import CommandError, CommandResult, run_streamed
@@ -520,6 +520,7 @@ def run_backup(config: dict[str, Any], *, due_only: bool = False, manual: bool =
                 logger.write(f"Backup run {run_id_value} completed with warnings.")
             else:
                 logger.write(f"Backup run {run_id_value} completed successfully.")
+            launchd.reload_later(str(paths.cli_path()))
     return 0
 
 

@@ -16,6 +16,7 @@ from .timeutil import iso, local_display, parse_iso, relative_display, utc_now
 GREEN = "#2da44e"
 ORANGE = "#fb8c00"
 RED = "#d1242f"
+DUE_EARLY_TOLERANCE = timedelta(minutes=5)
 
 
 def default_status() -> dict[str, Any]:
@@ -227,7 +228,13 @@ def is_stale(config: dict[str, Any], status: dict[str, Any], now=None) -> bool:
 def is_due(config: dict[str, Any], status: dict[str, Any], now=None) -> bool:
     if status.get("last_result") == "failed":
         return True
-    return is_stale(config, status, now=now)
+    current = now or utc_now()
+    last_success = parse_iso(status.get("last_success_at"))
+    if last_success is None:
+        return True
+    hours = float(config.get("backup_interval_hours", 24))
+    due_at = last_success + timedelta(hours=hours)
+    return current + DUE_EARLY_TOLERANCE >= due_at
 
 
 def summarize(config: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
